@@ -44,41 +44,41 @@ pub fn analyze_syllable(glyphs: &[Glyph]) -> SyllableAnalysis {
         };
     }
 
-    let mut v_start = len;
+    let mut v_start = None;
     for (i, g) in glyphs.iter().enumerate() {
         if g.is_vowel() {
-            v_start = i;
+            v_start = Some(i);
             break;
         }
     }
 
-    if v_start == 1
-        && glyphs[0].base == 'q'
-        && glyphs[1].base == 'u'
-        && glyphs[1].vmod == VowelMod::None
-        && len > 2
-        && glyphs[2].is_vowel()
-    {
-        v_start = 2;
-    }
-
-    if v_start == 1
-        && glyphs[0].base == 'g'
-        && glyphs[1].base == 'i'
-        && glyphs[1].vmod == VowelMod::None
-        && len > 2
-        && glyphs[2].is_vowel()
-    {
-        v_start = 2;
-    }
-
-    if v_start == len {
+    let Some(mut v_start) = v_start else {
         return SyllableAnalysis {
             initial_range: 0..len,
             vowel_range: len..len,
             final_range: len..len,
             is_structure_valid: true,
         };
+    };
+
+    if len > 2
+        && v_start == 1
+        && glyphs[0].base == 'q'
+        && glyphs[1].base == 'u'
+        && glyphs[1].vmod == VowelMod::None
+        && glyphs[2].is_vowel()
+    {
+        v_start = 2;
+    }
+
+    if len > 2
+        && v_start == 1
+        && glyphs[0].base == 'g'
+        && glyphs[1].base == 'i'
+        && glyphs[1].vmod == VowelMod::None
+        && glyphs[2].is_vowel()
+    {
+        v_start = 2;
     }
 
     let mut v_end = v_start;
