@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check-and-test:
+    name: Format, Clippy, Test & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Fcitx5 development dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            build-essential \
+            libfcitx5core-dev \
+            libfcitx5utils-dev
+
+      - name: Check formatting (rustfmt)
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy (Pure Rust targets)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Clippy (With Fcitx5 plugin feature)
+        run: cargo clippy --all-targets --features fcitx5-plugin -- -D warnings
+
+      - name: Run Automated Tests
+        run: cargo test --all-targets --features fcitx5-plugin --verbose
+
+      - name: Build Release Binaries and Shared Library
+        run: cargo build --release --features fcitx5-plugin
+
+      - name: Verify Shared Library Exports
+        run: |
+          test -f target/release/libfcitx5_tregai.so
+          test -f target/release/tregai-gui
+          nm -D target/release/libfcitx5_tregai.so | grep -q "fcitx_addon_factory_instance"
