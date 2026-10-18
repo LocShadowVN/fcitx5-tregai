@@ -104,7 +104,7 @@ fn open_system_webview(url: &str) {
     ];
 
     for (bin, args) in browsers {
-        if Command::new(bin).args(&args).spawn().is_ok() {
+        if Command::new(bin).args(args).spawn().is_ok() {
             return;
         }
     }
@@ -209,8 +209,7 @@ fn check_installation_status() -> (bool, bool, bool) {
         .arg("-x")
         .arg("fcitx5")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
 
     (user_installed, sys_installed, fcitx_running)
 }
@@ -220,14 +219,11 @@ fn install_plugin_user_local() -> (bool, String) {
         .args(["build", "--release", "--features", "fcitx5-plugin"])
         .status();
 
-    match status {
-        Ok(s) if s.success() => {}
-        _ => {
-            return (
-                false,
-                "Build failed. Ensure Fcitx5 development headers (libfcitx5core-dev / fcitx5) are installed.".to_string(),
-            );
-        }
+    if !status.is_ok_and(|s| s.success()) {
+        return (
+            false,
+            "Build failed. Ensure Fcitx5 development headers (libfcitx5core-dev / fcitx5) are installed.".to_string(),
+        );
     }
 
     let Ok(home) = env::var("HOME") else {
@@ -284,7 +280,7 @@ fn install_plugin_system_pkexec() -> (bool, String) {
         .args(["build", "--release", "--features", "fcitx5-plugin"])
         .status();
 
-    if !build_status.map(|s| s.success()).unwrap_or(false) {
+    if !build_status.is_ok_and(|s| s.success()) {
         return (
             false,
             "Build failed. Ensure Fcitx5 development headers are installed.".to_string(),
@@ -308,17 +304,17 @@ fn install_plugin_system_pkexec() -> (bool, String) {
     );
 
     let pk = Command::new("pkexec").args(["sh", "-c", &cmd]).status();
-    if pk.map(|s| s.success()).unwrap_or(false) {
+    if pk.is_ok_and(|s| s.success()) {
         let _ = Command::new("fcitx5").args(["-r", "-d"]).spawn();
         (
             true,
-            format!("Installed system-wide to {}/fcitx5 and restarted Fcitx5.", libdir),
+            format!(
+                "Installed system-wide to {}/fcitx5 and restarted Fcitx5.",
+                libdir
+            ),
         )
     } else {
-        (
-            false,
-            "System installation canceled or failed.".to_string(),
-        )
+        (false, "System installation canceled or failed.".to_string())
     }
 }
 
@@ -424,22 +420,25 @@ fn build_state_json(cfg: &ImeConfig) -> String {
 }
 
 fn url_decode(input: &str) -> String {
-    let mut bytes = Vec::with_capacity(input.len());
-    let mut chars = input.as_bytes().iter().copied();
-    while let Some(b) = chars.next() {
+    let raw = input.as_bytes();
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        let b = raw[i];
         if b == b'+' {
             bytes.push(b' ');
-        } else if b == b'%' {
-            let h1 = chars.next().unwrap_or(b'0');
-            let h2 = chars.next().unwrap_or(b'0');
-            let hex = [h1, h2];
+            i += 1;
+        } else if b == b'%' && i + 2 < raw.len() {
+            let hex = [raw[i + 1], raw[i + 2]];
             if let Ok(s) = std::str::from_utf8(&hex) {
                 if let Ok(val) = u8::from_str_radix(s, 16) {
                     bytes.push(val);
                 }
             }
+            i += 3;
         } else {
             bytes.push(b);
+            i += 1;
         }
     }
     String::from_utf8_lossy(&bytes).into_owned()
@@ -498,7 +497,7 @@ fn update_config_from_form(cfg: &mut ImeConfig, body: &str) {
     }
 }
 
-const WEBVIEW_HTML: &str = r#"<!DOCTYPE html>
+const WEBVIEW_HTML: &str = r#####"<!DOCTYPE html>
 <html lang="vi">
 <head>
 <meta charset="UTF-8">
@@ -746,86 +745,86 @@ const WEBVIEW_HTML: &str = r#"<!DOCTYPE html>
 <div id="notification" class="notification"></div>
 
 <script>
-let currentSmoothMode = "ultra_smooth";
+let currentSmoothMode = 'ultra_smooth';
 
 function notify(msg) {
-  const el = document.getElementById("notification");
+  const el = document.getElementById('notification');
   el.innerText = msg;
-  el.style.display = "block";
-  setTimeout(() => { el.style.display = "none"; }, 3000);
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 3000);
 }
 
 function selectSmoothMode(mode) {
   currentSmoothMode = mode;
-  document.querySelectorAll("#smooth-cards .mode-option").forEach(el => {
-    el.classList.toggle("selected", el.getAttribute("data-mode") === mode);
+  document.querySelectorAll('.mode-option').forEach(el => {
+    el.classList.toggle('selected', el.getAttribute('data-mode') === mode);
   });
 }
 
 async function loadState() {
-  const res = await fetch("/api/state");
+  const res = await fetch('/api/state');
   const data = await res.json();
 
-  document.getElementById("enabled").checked = data.enabled;
-  document.getElementById("method").value = data.method;
+  document.getElementById('enabled').checked = data.enabled;
+  document.getElementById('method').value = data.method;
   selectSmoothMode(data.smooth_mode);
-  document.getElementById("commit_delay_ms").value = data.commit_delay_ms;
-  document.getElementById("delay-label").innerText = data.commit_delay_ms + " ms";
-  document.getElementById("underline_preedit").checked = data.underline_preedit;
-  document.getElementById("modern_tone").checked = data.modern_tone;
-  document.getElementById("spell_check").checked = data.spell_check;
-  document.getElementById("free_tone").checked = data.free_tone;
-  document.getElementById("bracket_shortcuts").checked = data.bracket_shortcuts;
-  document.getElementById("quick_start_consonant").checked = data.quick_start_consonant;
-  document.getElementById("quick_end_consonant").checked = data.quick_end_consonant;
-  document.getElementById("auto_capitalize").checked = data.auto_capitalize;
-  document.getElementById("double_space_period").checked = data.double_space_period;
-  document.getElementById("allow_foreign_consonants").checked = data.allow_foreign_consonants;
-  document.getElementById("enable_macros").checked = data.enable_macros;
+  document.getElementById('commit_delay_ms').value = data.commit_delay_ms;
+  document.getElementById('delay-label').innerText = data.commit_delay_ms + ' ms';
+  document.getElementById('underline_preedit').checked = data.underline_preedit;
+  document.getElementById('modern_tone').checked = data.modern_tone;
+  document.getElementById('spell_check').checked = data.spell_check;
+  document.getElementById('free_tone').checked = data.free_tone;
+  document.getElementById('bracket_shortcuts').checked = data.bracket_shortcuts;
+  document.getElementById('quick_start_consonant').checked = data.quick_start_consonant;
+  document.getElementById('quick_end_consonant').checked = data.quick_end_consonant;
+  document.getElementById('auto_capitalize').checked = data.auto_capitalize;
+  document.getElementById('double_space_period').checked = data.double_space_period;
+  document.getElementById('allow_foreign_consonants').checked = data.allow_foreign_consonants;
+  document.getElementById('enable_macros').checked = data.enable_macros;
 
-  document.getElementById("macros_text").value = data.macros.map(m => `${m.key} = ${m.val}`).join("\n");
+  document.getElementById('macros_text').value = data.macros.map(m => `${m.key} = ${m.val}`).join('\n');
 
-  const dotInstall = document.getElementById("dot-install");
-  const textInstall = document.getElementById("text-install");
+  const dotInstall = document.getElementById('dot-install');
+  const textInstall = document.getElementById('text-install');
   if (data.status.sys_installed) {
-    dotInstall.className = "dot active";
-    textInstall.innerText = "System (/usr)";
+    dotInstall.className = 'dot active';
+    textInstall.innerText = 'System (/usr)';
   } else if (data.status.user_installed) {
-    dotInstall.className = "dot active";
-    textInstall.innerText = "User (~/.local)";
+    dotInstall.className = 'dot active';
+    textInstall.innerText = 'User (~/.local)';
   } else {
-    dotInstall.className = "dot";
-    textInstall.innerText = "Not Installed";
+    dotInstall.className = 'dot';
+    textInstall.innerText = 'Not Installed';
   }
 
-  const dotFcitx = document.getElementById("dot-fcitx");
-  const textFcitx = document.getElementById("text-fcitx");
-  dotFcitx.className = data.status.fcitx_running ? "dot active" : "dot";
-  textFcitx.innerText = data.status.fcitx_running ? "Fcitx5 Active" : "Fcitx5 Inactive";
+  const dotFcitx = document.getElementById('dot-fcitx');
+  const textFcitx = document.getElementById('text-fcitx');
+  dotFcitx.className = data.status.fcitx_running ? 'dot active' : 'dot';
+  textFcitx.innerText = data.status.fcitx_running ? 'Fcitx5 Active' : 'Fcitx5 Inactive';
 
   runSandboxTest();
 }
 
 async function saveConfig() {
   const params = new URLSearchParams();
-  params.set("enabled", document.getElementById("enabled").checked);
-  params.set("method", document.getElementById("method").value);
-  params.set("smooth_mode", currentSmoothMode);
-  params.set("commit_delay_ms", document.getElementById("commit_delay_ms").value);
-  params.set("underline_preedit", document.getElementById("underline_preedit").checked);
-  params.set("modern_tone", document.getElementById("modern_tone").checked);
-  params.set("spell_check", document.getElementById("spell_check").checked);
-  params.set("free_tone", document.getElementById("free_tone").checked);
-  params.set("bracket_shortcuts", document.getElementById("bracket_shortcuts").checked);
-  params.set("quick_start_consonant", document.getElementById("quick_start_consonant").checked);
-  params.set("quick_end_consonant", document.getElementById("quick_end_consonant").checked);
-  params.set("auto_capitalize", document.getElementById("auto_capitalize").checked);
-  params.set("double_space_period", document.getElementById("double_space_period").checked);
-  params.set("allow_foreign_consonants", document.getElementById("allow_foreign_consonants").checked);
-  params.set("enable_macros", document.getElementById("enable_macros").checked);
-  params.set("macros_text", document.getElementById("macros_text").value);
+  params.set('enabled', document.getElementById('enabled').checked);
+  params.set('method', document.getElementById('method').value);
+  params.set('smooth_mode', currentSmoothMode);
+  params.set('commit_delay_ms', document.getElementById('commit_delay_ms').value);
+  params.set('underline_preedit', document.getElementById('underline_preedit').checked);
+  params.set('modern_tone', document.getElementById('modern_tone').checked);
+  params.set('spell_check', document.getElementById('spell_check').checked);
+  params.set('free_tone', document.getElementById('free_tone').checked);
+  params.set('bracket_shortcuts', document.getElementById('bracket_shortcuts').checked);
+  params.set('quick_start_consonant', document.getElementById('quick_start_consonant').checked);
+  params.set('quick_end_consonant', document.getElementById('quick_end_consonant').checked);
+  params.set('auto_capitalize', document.getElementById('auto_capitalize').checked);
+  params.set('double_space_period', document.getElementById('double_space_period').checked);
+  params.set('allow_foreign_consonants', document.getElementById('allow_foreign_consonants').checked);
+  params.set('enable_macros', document.getElementById('enable_macros').checked);
+  params.set('macros_text', document.getElementById('macros_text').value);
 
-  const res = await fetch("/api/save", { method: "POST", body: params.toString() });
+  const res = await fetch('/api/save', { method: 'POST', body: params.toString() });
   const data = await res.json();
   notify(data.message);
   runSandboxTest();
@@ -833,22 +832,22 @@ async function saveConfig() {
 
 async function runSandboxTest() {
   const params = new URLSearchParams();
-  params.set("text", document.getElementById("sandbox-in").value);
-  const res = await fetch("/api/test", { method: "POST", body: params.toString() });
+  params.set('text', document.getElementById('sandbox-in').value);
+  const res = await fetch('/api/test', { method: 'POST', body: params.toString() });
   const data = await res.json();
-  document.getElementById("sandbox-out").value = data.result;
+  document.getElementById('sandbox-out').value = data.result;
 }
 
 async function apiAction(endpoint) {
-  notify("Processing request...");
-  const res = await fetch(endpoint, { method: "POST" });
+  notify('Processing request...');
+  const res = await fetch(endpoint, { method: 'POST' });
   const data = await res.json();
   notify(data.message);
   await loadState();
 }
 
-window.addEventListener("DOMContentLoaded", loadState);
+window.addEventListener('DOMContentLoaded', loadState);
 </script>
 </body>
 </html>
-"#;
+"#####;
