@@ -135,8 +135,8 @@ pub fn find_tone_position(glyphs: &[Glyph], modern_tone: bool) -> Option<usize> 
     }
 
     let v_start = analysis.vowel_range.start;
-    let vowels = &glyphs[analysis.vowel_range.clone()];
     let has_coda = !analysis.final_range.is_empty();
+    let vowels = &glyphs[analysis.vowel_range];
 
     if vowels.len() == 1 {
         return Some(v_start);
