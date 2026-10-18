@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Tre Gai Input Method
+Comment=Configure Tre Gai Vietnamese Input Method for Fcitx5
+Exec=tregai-gui
+Icon=input-keyboard
+Terminal=false
+Type=Application
+Categories=Settings;Utility;
