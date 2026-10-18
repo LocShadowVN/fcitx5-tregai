@@ -1,0 +1,161 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag phien ban (vi du: v1.0.0)"
+        required: true
+        default: "v1.0.0"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-upload-assets:
+    name: Build .deb & Upload to Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag and Debian version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            RAW_TAG="${{ github.event.release.tag_name }}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW_TAG="${{ inputs.tag }}"
+          else
+            RAW_TAG="${GITHUB_REF_NAME}"
+          fi
+
+          CLEAN_VER=$(echo "${RAW_TAG}" | sed -E 's/^[^0-9]*//')
+          if [ -z "${CLEAN_VER}" ]; then
+            CLEAN_VER="1.0.0"
+          fi
+
+          echo "TAG=${RAW_TAG}" >> "$GITHUB_ENV"
+          echo "VERSION=${CLEAN_VER}" >> "$GITHUB_ENV"
+          echo "Resolved TAG=${RAW_TAG}, DEBIAN_VERSION=${CLEAN_VER}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Fcitx5 development dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            build-essential \
+            libfcitx5core-dev \
+            libfcitx5utils-dev \
+            fcitx5
+
+      - name: Build Release Binaries
+        run: |
+          cargo build --release --features fcitx5-plugin
+          strip target/release/libfcitx5_tregai.so
+          strip target/release/tregai-gui
+
+      - name: Package Debian Installer (.deb)
+        run: |
+          DEB_NAME="fcitx5-tregai_${VERSION}_amd64"
+          PKG_DIR="dist/${DEB_NAME}"
+          LIBDIR=$(pkg-config --variable=libdir Fcitx5Core || echo "/usr/lib/x86_64-linux-gnu")
+
+          mkdir -p "${PKG_DIR}/DEBIAN"
+          mkdir -p "${PKG_DIR}${LIBDIR}/fcitx5"
+          mkdir -p "${PKG_DIR}/usr/bin"
+          mkdir -p "${PKG_DIR}/usr/share/fcitx5/addon"
+          mkdir -p "${PKG_DIR}/usr/share/fcitx5/inputmethod"
+          mkdir -p "${PKG_DIR}/usr/share/applications"
+          mkdir -p "${PKG_DIR}/usr/share/doc/fcitx5-tregai"
+
+          install -m 755 target/release/libfcitx5_tregai.so "${PKG_DIR}${LIBDIR}/fcitx5/libfcitx5_tregai.so"
+          install -m 755 target/release/tregai-gui "${PKG_DIR}/usr/bin/tregai-gui"
+          install -m 644 data/tregai-addon.conf "${PKG_DIR}/usr/share/fcitx5/addon/tregai.conf"
+          install -m 644 data/tregai.conf "${PKG_DIR}/usr/share/fcitx5/inputmethod/tregai.conf"
+          install -m 644 data/tregai-gui.desktop "${PKG_DIR}/usr/share/applications/tregai-gui.desktop"
+          install -m 644 LICENSE "${PKG_DIR}/usr/share/doc/fcitx5-tregai/copyright"
+          install -m 644 README.md "${PKG_DIR}/usr/share/doc/fcitx5-tregai/README.md"
+
+          cat <<EOF > "${PKG_DIR}/DEBIAN/control"
+          Package: fcitx5-tregai
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Depends: fcitx5, libc6, libstdc++6, libgcc-s1
+          Maintainer: Tre Gai Contributors <noreply@github.com>
+          Homepage: https://github.com/${GITHUB_REPOSITORY}
+          Description: Tre Gai Vietnamese Input Method Engine for Fcitx5
+           Pure Rust Vietnamese Input Method Engine (Telex, VNI, VIQR) for Fcitx5
+           with a graphical configuration manager (tregai-gui).
+          EOF
+
+          dpkg-deb --build --root-owner-group "${PKG_DIR}" "dist/${DEB_NAME}.deb"
+
+      - name: Test .deb Installation
+        run: |
+          sudo apt-get install -y "./dist/fcitx5-tregai_${VERSION}_amd64.deb"
+          which tregai-gui
+          test -f /usr/share/fcitx5/addon/tregai.conf
+          test -f /usr/share/fcitx5/inputmethod/tregai.conf
+
+      - name: Package Portable Archive (.tar.gz)
+        run: |
+          TAR_NAME="fcitx5-tregai-${TAG}-x86_64-linux"
+          TAR_DIR="dist/${TAR_NAME}"
+          mkdir -p "${TAR_DIR}/data"
+
+          cp target/release/libfcitx5_tregai.so "${TAR_DIR}/"
+          cp target/release/tregai-gui "${TAR_DIR}/"
+          cp data/tregai-addon.conf "${TAR_DIR}/data/"
+          cp data/tregai.conf "${TAR_DIR}/data/"
+          cp data/tregai-gui.desktop "${TAR_DIR}/data/"
+          cp LICENSE README.md "${TAR_DIR}/"
+
+          cat << 'EOF' > "${TAR_DIR}/install.sh"
+          #!/usr/bin/env bash
+          set -euo pipefail
+          LIBDIR=$(pkg-config --variable=libdir Fcitx5Core 2>/dev/null || echo "/usr/lib")
+          sudo install -Dm755 libfcitx5_tregai.so "${LIBDIR}/fcitx5/libfcitx5_tregai.so"
+          sudo install -Dm755 tregai-gui /usr/bin/tregai-gui
+          sudo install -Dm644 data/tregai-addon.conf /usr/share/fcitx5/addon/tregai.conf
+          sudo install -Dm644 data/tregai.conf /usr/share/fcitx5/inputmethod/tregai.conf
+          sudo install -Dm644 data/tregai-gui.desktop /usr/share/applications/tregai-gui.desktop
+          echo "Installed fcitx5-tregai successfully."
+          EOF
+          chmod +x "${TAR_DIR}/install.sh"
+
+          tar -C dist -czf "dist/${TAR_NAME}.tar.gz" "${TAR_NAME}"
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum *.deb *.tar.gz > SHA256SUMS.txt
+
+      - name: Upload Assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: |
+            dist/*.deb
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
