@@ -125,7 +125,12 @@ fn handle_http_client(mut stream: std::net::TcpStream, config: Arc<Mutex<ImeConf
     let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
 
     if first_line.starts_with("GET / ") || first_line.starts_with("GET /index.html") {
-        send_response(&mut stream, "200 OK", "text/html; charset=utf-8", WEBVIEW_HTML);
+        send_response(
+            &mut stream,
+            "200 OK",
+            "text/html; charset=utf-8",
+            WEBVIEW_HTML,
+        );
     } else if first_line.starts_with("GET /api/state") {
         let cfg = config.lock().unwrap();
         let json = build_state_json(&cfg);

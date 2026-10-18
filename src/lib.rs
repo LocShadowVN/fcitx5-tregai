@@ -35,10 +35,7 @@ mod tests {
     #[test]
     fn test_tregai_sentences_and_tones() {
         let mut engine = ImeEngine::new(ImeConfig::default());
-        let text = simulate_typing(
-            &mut engine,
-            "Booj gox Tre Gai sieeu muwowtj treen Linux!",
-        );
+        let text = simulate_typing(&mut engine, "Booj gox Tre Gai sieeu muwowtj treen Linux!");
         assert_eq!(text, "Bộ gõ Tre Gai siêu mượt trên Linux!");
     }
 

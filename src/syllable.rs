@@ -24,13 +24,13 @@ const VALID_FINALS: &[&str] = &["", "c", "ch", "m", "n", "ng", "nh", "p", "t"];
 
 const OPEN_VOWEL_CLUSTERS: &[&str] = &[
     "a", "e", "ê", "i", "o", "ô", "ơ", "u", "ư", "y", "ai", "ao", "au", "ay", "âu", "ây", "eo",
-    "êu", "ia", "iu", "oa", "oe", "oi", "ôi", "ơi", "ua", "ui", "ưi", "ưa", "ưu", "uơ", "ươ",
-    "uy", "uê", "oo", "iêu", "yêu", "oai", "oay", "oao", "uôi", "ươi", "ươu", "uya", "uyu", "uây",
+    "êu", "ia", "iu", "oa", "oe", "oi", "ôi", "ơi", "ua", "ui", "ưi", "ưa", "ưu", "uơ", "ươ", "uy",
+    "uê", "oo", "iêu", "yêu", "oai", "oay", "oao", "uôi", "ươi", "ươu", "uya", "uyu", "uây",
 ];
 
 const CLOSED_VOWEL_CLUSTERS: &[&str] = &[
-    "a", "ă", "â", "e", "ê", "i", "o", "ô", "ơ", "u", "ư", "y", "iê", "yê", "ia", "ua", "uâ",
-    "uô", "ươ", "oa", "oă", "oe", "uê", "uy", "oo", "uyê",
+    "a", "ă", "â", "e", "ê", "i", "o", "ô", "ơ", "u", "ư", "y", "iê", "yê", "ia", "ua", "uâ", "uô",
+    "ươ", "oa", "oă", "oe", "uê", "uy", "oo", "uyê",
 ];
 
 pub fn analyze_syllable(glyphs: &[Glyph]) -> SyllableAnalysis {

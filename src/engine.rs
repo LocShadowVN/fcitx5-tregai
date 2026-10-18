@@ -691,8 +691,7 @@ impl ImeEngine {
         }
 
         for idx in v_range.rev() {
-            if matches!(self.glyphs[idx].base, 'o' | 'u')
-                && self.glyphs[idx].vmod != VowelMod::Horn
+            if matches!(self.glyphs[idx].base, 'o' | 'u') && self.glyphs[idx].vmod != VowelMod::Horn
             {
                 let prev = self.glyphs[idx].vmod;
                 self.glyphs[idx].vmod = VowelMod::Horn;
