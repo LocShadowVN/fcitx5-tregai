@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use crate::unicode::Charset;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -54,8 +55,8 @@ impl SmoothMode {
 
     pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
-            "smooth" | "direct" => Self::Smooth,
-            "slow_compat" | "slow" | "compat" => Self::SlowCompat,
+            "smooth" | "direct" | "surrounding" => Self::Smooth,
+            "slow_compat" | "slow" | "compat" | "delay" => Self::SlowCompat,
             "gaming" | "game" => Self::Gaming,
             _ => Self::UltraSmooth,
         }
@@ -66,12 +67,15 @@ impl SmoothMode {
 pub struct ImeConfig {
     pub enabled: bool,
     pub method: InputMethod,
+    pub charset: Charset,
     pub smooth_mode: SmoothMode,
     pub commit_delay_ms: u32,
     pub underline_preedit: bool,
     pub modern_tone: bool,
     pub spell_check: bool,
+    pub auto_restore_english: bool,
     pub free_tone: bool,
+    pub w_to_u: bool,
     pub bracket_shortcuts: bool,
     pub quick_start_consonant: bool,
     pub quick_end_consonant: bool,
@@ -79,6 +83,8 @@ pub struct ImeConfig {
     pub double_space_period: bool,
     pub allow_foreign_consonants: bool,
     pub enable_macros: bool,
+    pub macro_in_english_mode: bool,
+    pub excluded_apps: Vec<String>,
     pub macros: BTreeMap<String, String>,
 }
 
@@ -95,12 +101,15 @@ impl Default for ImeConfig {
         Self {
             enabled: true,
             method: InputMethod::Telex,
+            charset: Charset::Unicode,
             smooth_mode: SmoothMode::UltraSmooth,
             commit_delay_ms: 15,
             underline_preedit: true,
             modern_tone: false,
             spell_check: true,
+            auto_restore_english: true,
             free_tone: true,
+            w_to_u: true,
             bracket_shortcuts: true,
             quick_start_consonant: false,
             quick_end_consonant: false,
@@ -108,6 +117,13 @@ impl Default for ImeConfig {
             double_space_period: false,
             allow_foreign_consonants: false,
             enable_macros: true,
+            macro_in_english_mode: false,
+            excluded_apps: vec![
+                "steam".to_string(),
+                "cs2".to_string(),
+                "dota2".to_string(),
+                "lutris".to_string(),
+            ],
             macros,
         }
     }
@@ -159,12 +175,18 @@ impl ImeConfig {
         out.push_str("[general]\n");
         out.push_str(&format!("enabled = {}\n", self.enabled));
         out.push_str(&format!("method = {}\n", self.method.as_str()));
+        out.push_str(&format!("charset = {}\n", self.charset.as_str()));
         out.push_str(&format!("smooth_mode = {}\n", self.smooth_mode.as_str()));
         out.push_str(&format!("commit_delay_ms = {}\n", self.commit_delay_ms));
         out.push_str(&format!("underline_preedit = {}\n", self.underline_preedit));
         out.push_str(&format!("modern_tone = {}\n", self.modern_tone));
         out.push_str(&format!("spell_check = {}\n", self.spell_check));
+        out.push_str(&format!(
+            "auto_restore_english = {}\n",
+            self.auto_restore_english
+        ));
         out.push_str(&format!("free_tone = {}\n", self.free_tone));
+        out.push_str(&format!("w_to_u = {}\n", self.w_to_u));
         out.push_str(&format!("bracket_shortcuts = {}\n", self.bracket_shortcuts));
         out.push_str(&format!(
             "quick_start_consonant = {}\n",
@@ -183,7 +205,15 @@ impl ImeConfig {
             "allow_foreign_consonants = {}\n",
             self.allow_foreign_consonants
         ));
-        out.push_str(&format!("enable_macros = {}\n\n", self.enable_macros));
+        out.push_str(&format!("enable_macros = {}\n", self.enable_macros));
+        out.push_str(&format!(
+            "macro_in_english_mode = {}\n",
+            self.macro_in_english_mode
+        ));
+        out.push_str(&format!(
+            "excluded_apps = {}\n\n",
+            self.excluded_apps.join(", ")
+        ));
 
         out.push_str("[macros]\n");
         for (k, v) in &self.macros {
@@ -226,6 +256,7 @@ impl ImeConfig {
                 match key.to_ascii_lowercase().as_str() {
                     "enabled" => cfg.enabled = b,
                     "method" => cfg.method = InputMethod::parse(val),
+                    "charset" => cfg.charset = Charset::parse(val),
                     "smooth_mode" => cfg.smooth_mode = SmoothMode::parse(val),
                     "commit_delay_ms" => {
                         cfg.commit_delay_ms = val.parse::<u32>().unwrap_or(15).min(100)
@@ -233,7 +264,9 @@ impl ImeConfig {
                     "underline_preedit" => cfg.underline_preedit = b,
                     "modern_tone" => cfg.modern_tone = b,
                     "spell_check" => cfg.spell_check = b,
+                    "auto_restore_english" => cfg.auto_restore_english = b,
                     "free_tone" => cfg.free_tone = b,
+                    "w_to_u" => cfg.w_to_u = b,
                     "bracket_shortcuts" => cfg.bracket_shortcuts = b,
                     "quick_start_consonant" => cfg.quick_start_consonant = b,
                     "quick_end_consonant" => cfg.quick_end_consonant = b,
@@ -241,11 +274,27 @@ impl ImeConfig {
                     "double_space_period" => cfg.double_space_period = b,
                     "allow_foreign_consonants" => cfg.allow_foreign_consonants = b,
                     "enable_macros" => cfg.enable_macros = b,
+                    "macro_in_english_mode" => cfg.macro_in_english_mode = b,
+                    "excluded_apps" => {
+                        cfg.excluded_apps = val
+                            .split(',')
+                            .map(|s| s.trim().to_ascii_lowercase())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
                     _ => {}
                 }
             }
         }
         cfg
+    }
+
+    pub fn is_app_excluded(&self, app_name: &str) -> bool {
+        if app_name.is_empty() {
+            return false;
+        }
+        let lower = app_name.trim().to_ascii_lowercase();
+        self.excluded_apps.iter().any(|item| item == &lower)
     }
 
     pub fn expand_macro(&self, word: &str) -> Option<String> {
