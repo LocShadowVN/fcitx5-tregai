@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <cstring>
 #include <fcitx-utils/capabilityflags.h>
+#include <fcitx-utils/key.h>
+#include <fcitx-utils/keysym.h>
 #include <fcitx/addonfactory.h>
 #include <fcitx/addoninstance.h>
 #include <fcitx/addonmanager.h>
@@ -24,6 +26,7 @@ struct FfiKeyResult {
     bool handled;
     char *commit_text;
     char *preedit_text;
+    uint32_t backspace_count;
     bool underline_preedit;
     bool direct_mode;
     uint32_t commit_delay_ms;
@@ -32,6 +35,7 @@ struct FfiKeyResult {
 VietImeContext *viet_ime_context_new();
 void viet_ime_context_free(VietImeContext *ctx);
 void viet_ime_context_reset(VietImeContext *ctx);
+void viet_ime_context_set_program(VietImeContext *ctx, const char *program);
 void viet_ime_context_reload_config(VietImeContext *ctx);
 FfiKeyResult viet_ime_context_flush(VietImeContext *ctx);
 FfiKeyResult viet_ime_context_process_key(VietImeContext *ctx,
@@ -42,16 +46,6 @@ void viet_ime_free_result(FfiKeyResult res);
 }
 
 namespace {
-
-static size_t countUtf8Codepoints(const std::string &s) {
-    size_t count = 0;
-    for (unsigned char c : s) {
-        if ((c & 0xC0) != 0x80) {
-            ++count;
-        }
-    }
-    return count;
-}
 
 class TreGaiState final : public fcitx::InputContextProperty {
 public:
@@ -67,11 +61,9 @@ public:
     TreGaiState &operator=(const TreGaiState &) = delete;
 
     VietImeContext *ctx() const { return ctx_; }
-    size_t &directCommittedChars() { return direct_committed_chars_; }
 
 private:
     VietImeContext *ctx_;
-    size_t direct_committed_chars_ = 0;
 };
 
 class TreGaiEngine final : public fcitx::InputMethodEngineV2 {
@@ -86,7 +78,7 @@ public:
                   fcitx::InputContextEvent &event) override {
         auto *ic = event.inputContext();
         auto *state = ic->propertyFor(&factory_);
-        state->directCommittedChars() = 0;
+        viet_ime_context_set_program(state->ctx(), ic->program().c_str());
         viet_ime_context_reset(state->ctx());
     }
 
@@ -96,10 +88,7 @@ public:
         auto *state = ic->propertyFor(&factory_);
         if (event.type() == fcitx::EventType::InputContextFocusOut) {
             FfiKeyResult flushed = viet_ime_context_flush(state->ctx());
-            if (!flushed.direct_mode && flushed.commit_text && flushed.commit_text[0] != '\0') {
-                ic->commitString(flushed.commit_text);
-            }
-            state->directCommittedChars() = 0;
+            applyResultToContext(ic, flushed);
             viet_ime_free_result(flushed);
         }
         reset(entry, event);
@@ -110,55 +99,15 @@ public:
         auto *ic = keyEvent.inputContext();
         auto *state = ic->propertyFor(&factory_);
 
+        viet_ime_context_set_program(state->ctx(), ic->program().c_str());
+
         FfiKeyResult res = viet_ime_context_process_key(
             state->ctx(),
             static_cast<uint32_t>(keyEvent.key().sym()),
             static_cast<uint32_t>(keyEvent.key().states()),
             keyEvent.isRelease());
 
-        if (res.commit_delay_ms > 0 && (res.commit_text || res.preedit_text)) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(res.commit_delay_ms));
-        }
-
-        const bool supports_surrounding =
-            ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText);
-
-        if (res.direct_mode && supports_surrounding) {
-            updatePreeditPanel(ic, nullptr, false);
-
-            if (res.commit_text && res.commit_text[0] != '\0') {
-                if (state->directCommittedChars() > 0) {
-                    ic->deleteSurroundingText(
-                        -static_cast<int>(state->directCommittedChars()),
-                        static_cast<unsigned int>(state->directCommittedChars()));
-                }
-                ic->commitString(res.commit_text);
-                state->directCommittedChars() = 0;
-            } else if (res.preedit_text) {
-                std::string current_word(res.preedit_text);
-                if (state->directCommittedChars() > 0) {
-                    ic->deleteSurroundingText(
-                        -static_cast<int>(state->directCommittedChars()),
-                        static_cast<unsigned int>(state->directCommittedChars()));
-                }
-                if (!current_word.empty()) {
-                    ic->commitString(current_word);
-                }
-                state->directCommittedChars() = countUtf8Codepoints(current_word);
-            } else if (res.handled && state->directCommittedChars() > 0) {
-                ic->deleteSurroundingText(
-                    -static_cast<int>(state->directCommittedChars()),
-                    static_cast<unsigned int>(state->directCommittedChars()));
-                state->directCommittedChars() = 0;
-            }
-        } else {
-            state->directCommittedChars() = 0;
-            if (res.commit_text && res.commit_text[0] != '\0') {
-                ic->commitString(res.commit_text);
-            }
-            updatePreeditPanel(ic, res.preedit_text, res.underline_preedit);
-        }
+        applyResultToContext(ic, res);
 
         if (res.handled) {
             keyEvent.filterAndAccept();
@@ -171,7 +120,6 @@ public:
                fcitx::InputContextEvent &event) override {
         auto *ic = event.inputContext();
         auto *state = ic->propertyFor(&factory_);
-        state->directCommittedChars() = 0;
         viet_ime_context_reset(state->ctx());
         updatePreeditPanel(ic, nullptr, false);
     }
@@ -185,6 +133,46 @@ public:
     }
 
 private:
+    static void applyResultToContext(fcitx::InputContext *ic, const FfiKeyResult &res) {
+        if (res.direct_mode) {
+            updatePreeditPanel(ic, nullptr, false);
+
+            if (res.backspace_count > 0) {
+                if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
+                    ic->deleteSurroundingText(
+                        -static_cast<int>(res.backspace_count),
+                        res.backspace_count);
+                } else {
+                    const fcitx::Key bsKey(FcitxKey_BackSpace);
+                    for (uint32_t i = 0; i < res.backspace_count; ++i) {
+                        ic->forwardKey(bsKey, false);
+                        ic->forwardKey(bsKey, true);
+                    }
+                }
+            }
+
+            if (res.commit_delay_ms > 0 && (res.backspace_count > 0 || res.commit_text)) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(res.commit_delay_ms));
+            }
+
+            if (res.commit_text && res.commit_text[0] != '\0') {
+                ic->commitString(res.commit_text);
+            }
+        } else {
+            if (res.commit_delay_ms > 0 && res.commit_text) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(res.commit_delay_ms));
+            }
+
+            if (res.commit_text && res.commit_text[0] != '\0') {
+                ic->commitString(res.commit_text);
+            }
+
+            updatePreeditPanel(ic, res.preedit_text, res.underline_preedit);
+        }
+    }
+
     static void updatePreeditPanel(fcitx::InputContext *ic,
                                    const char *preedit_str,
                                    bool underline) {
