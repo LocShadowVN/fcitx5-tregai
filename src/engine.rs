@@ -102,7 +102,7 @@ impl ImeEngine {
             } else {
                 Tone::None
             };
-            out.push(g.render(applied_tone));
+            out.push_str(&g.render_with_charset(applied_tone, self.config.charset));
         }
         out
     }
@@ -124,6 +124,7 @@ impl ImeEngine {
         } else if let Some(expanded_raw) = self.config.expand_macro(&raw) {
             expanded_raw
         } else if self.config.spell_check
+            && self.config.auto_restore_english
             && self.transformed
             && !is_valid_vietnamese_syllable(
                 &self.glyphs,
@@ -167,6 +168,9 @@ impl ImeEngine {
 
     pub fn process_char(&mut self, mut ch: char) -> KeyProcessResult {
         if !self.config.enabled {
+            if self.config.enable_macros && self.config.macro_in_english_mode {
+                return self.process_english_macro_char(ch);
+            }
             return KeyProcessResult {
                 handled: false,
                 commit: None,
@@ -284,6 +288,36 @@ impl ImeEngine {
             handled: true,
             commit: None,
             preedit: self.render_current_word(),
+        }
+    }
+
+    fn process_english_macro_char(&mut self, ch: char) -> KeyProcessResult {
+        if ch.is_ascii_alphabetic() {
+            self.raw_keys.push(ch);
+            self.glyphs.push(Glyph::new(ch));
+            return KeyProcessResult {
+                handled: true,
+                commit: None,
+                preedit: self.render_raw_keys(),
+            };
+        }
+
+        if self.glyphs.is_empty() {
+            return KeyProcessResult {
+                handled: false,
+                commit: None,
+                preedit: String::new(),
+            };
+        }
+
+        let raw = self.render_raw_keys();
+        let mut out = self.config.expand_macro(&raw).unwrap_or(raw);
+        out.push(ch);
+        self.clear();
+        KeyProcessResult {
+            handled: true,
+            commit: Some(out),
+            preedit: String::new(),
         }
     }
 
@@ -480,6 +514,7 @@ impl ImeEngine {
         match self.config.method {
             InputMethod::Telex | InputMethod::SimpleTelex => {
                 let allow_standalone_w = self.config.method == InputMethod::Telex
+                    && self.config.w_to_u
                     && (self.config.smooth_mode != SmoothMode::Gaming || !self.glyphs.is_empty());
                 self.apply_telex(ch, lower, allow_standalone_w)
             }
@@ -666,7 +701,10 @@ impl ImeEngine {
 
         let has_coda = !analysis.final_range.is_empty();
 
-        if v_len >= 2 && self.glyphs[v_start].base == 'u' && self.glyphs[v_start + 1].base == 'o' {
+        if v_len >= 2
+            && self.glyphs[v_start].base == 'u'
+            && self.glyphs[v_start + 1].base == 'o'
+        {
             let u_idx = v_start;
             let o_idx = v_start + 1;
             let prev_u = self.glyphs[u_idx].vmod;
