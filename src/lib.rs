@@ -12,9 +12,9 @@ mod tests {
     use crate::engine::ImeEngine;
     use crate::ffi::{
         viet_ime_context_free, viet_ime_context_new, viet_ime_context_process_key,
-        viet_ime_free_result,
+        viet_ime_context_set_program, viet_ime_free_result,
     };
-    use std::ffi::CStr;
+    use std::ffi::{CStr, CString};
 
     pub fn simulate_typing(engine: &mut ImeEngine, input: &str) -> String {
         let mut output = String::new();
@@ -122,15 +122,34 @@ mod tests {
     }
 
     #[test]
-    fn test_gaming_mode_wasd_protection() {
+    fn test_gaming_mode_and_w_to_u_option() {
         let cfg = ImeConfig {
             smooth_mode: SmoothMode::Gaming,
             ..ImeConfig::default()
         };
         let mut engine = ImeEngine::new(cfg);
-
         assert_eq!(simulate_typing(&mut engine, "w a s d"), "w a s d");
         assert_eq!(simulate_typing(&mut engine, "muaw"), "mưa");
+
+        let no_w_cfg = ImeConfig {
+            w_to_u: false,
+            ..ImeConfig::default()
+        };
+        let mut no_w_engine = ImeEngine::new(no_w_cfg);
+        assert_eq!(simulate_typing(&mut no_w_engine, "w"), "w");
+        assert_eq!(simulate_typing(&mut no_w_engine, "tuongw"), "tương");
+    }
+
+    #[test]
+    fn test_macro_in_english_mode() {
+        let cfg = ImeConfig {
+            enabled: false,
+            enable_macros: true,
+            macro_in_english_mode: true,
+            ..ImeConfig::default()
+        };
+        let mut engine = ImeEngine::new(cfg);
+        assert_eq!(simulate_typing(&mut engine, "vn "), "Việt Nam ");
     }
 
     #[test]
@@ -164,22 +183,32 @@ mod tests {
     }
 
     #[test]
-    fn test_ffi_bridge_execution() {
+    fn test_ffi_direct_smooth_mode_and_excluded_apps() {
         unsafe {
             let ctx = viet_ime_context_new();
             assert!(!ctx.is_null());
+            (*ctx).engine.config.smooth_mode = SmoothMode::Smooth;
 
-            for &ch in b"tregai" {
+            let mut screen = String::new();
+            for &ch in b"vieetj " {
                 let res = viet_ime_context_process_key(ctx, ch as u32, 0, false);
                 assert!(res.handled);
+                for _ in 0..res.backspace_count {
+                    screen.pop();
+                }
+                if !res.commit_text.is_null() {
+                    let s = CStr::from_ptr(res.commit_text).to_str().unwrap();
+                    screen.push_str(s);
+                }
                 viet_ime_free_result(res);
             }
+            assert_eq!(screen, "việt ");
 
-            let space = viet_ime_context_process_key(ctx, b' ' as u32, 0, false);
-            assert!(space.handled);
-            let s = CStr::from_ptr(space.commit_text).to_str().unwrap();
-            assert_eq!(s, "tregai ");
-            viet_ime_free_result(space);
+            let prog = CString::new("steam").unwrap();
+            viet_ime_context_set_program(ctx, prog.as_ptr());
+            let res = viet_ime_context_process_key(ctx, b'a' as u32, 0, false);
+            assert!(!res.handled);
+            viet_ime_free_result(res);
 
             viet_ime_context_free(ctx);
         }
