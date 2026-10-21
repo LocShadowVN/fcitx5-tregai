@@ -701,10 +701,7 @@ impl ImeEngine {
 
         let has_coda = !analysis.final_range.is_empty();
 
-        if v_len >= 2
-            && self.glyphs[v_start].base == 'u'
-            && self.glyphs[v_start + 1].base == 'o'
-        {
+        if v_len >= 2 && self.glyphs[v_start].base == 'u' && self.glyphs[v_start + 1].base == 'o' {
             let u_idx = v_start;
             let o_idx = v_start + 1;
             let prev_u = self.glyphs[u_idx].vmod;
