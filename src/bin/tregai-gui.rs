@@ -2,15 +2,35 @@
 
 use fcitx5_tregai::config::{ImeConfig, InputMethod, SmoothMode};
 use fcitx5_tregai::engine::ImeEngine;
+use fcitx5_tregai::unicode::Charset;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::path::PathBuf;
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
+
+const ADDON_CONF_CONTENT: &str = "[Addon]\n\
+Name=Tre Gai Vietnamese Input Method\n\
+Comment=Vietnamese Input Method Engine for Fcitx5 written in Rust\n\
+Category=InputMethod\n\
+Version=1.0.1\n\
+Library=libfcitx5_tregai\n\
+Type=SharedLibrary\n\
+OnDemand=True\n\
+Configurable=False\n";
+
+const IM_CONF_CONTENT: &str = "[InputMethod]\n\
+Name=Tiếng Việt (Tre Gai)\n\
+Icon=input-keyboard\n\
+Label=TG\n\
+LangCode=vi\n\
+Addon=tregai\n\
+Configurable=False\n";
 
 fn main() {
     let config = Arc::new(Mutex::new(ImeConfig::load_from_disk()));
@@ -60,7 +80,7 @@ fn launch_native_webview(url: &str) {
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("Tre Gai Input Method Configuration")
-        .with_inner_size(LogicalSize::new(1020.0, 760.0))
+        .with_inner_size(LogicalSize::new(1040.0, 800.0))
         .build(&event_loop)
         .expect("Failed to create window");
 
@@ -111,44 +131,85 @@ fn open_system_webview(url: &str) {
     println!("Open the following URL in your browser: {}", url);
 }
 
-fn handle_http_client(mut stream: std::net::TcpStream, config: Arc<Mutex<ImeConfig>>) {
-    let mut buf = [0u8; 65536];
-    let Ok(n) = stream.read(&mut buf) else {
-        return;
-    };
-    if n == 0 {
-        return;
+fn read_http_request(stream: &mut TcpStream) -> Option<(String, String)> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut buffer = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 4096];
+    let mut header_end = None;
+    let mut content_length = 0usize;
+
+    loop {
+        let Ok(n) = stream.read(&mut chunk) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..n]);
+
+        if header_end.is_none() {
+            if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                let end = pos + 4;
+                header_end = Some(end);
+                let header_str = String::from_utf8_lossy(&buffer[..end]);
+                for line in header_str.lines() {
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.trim().eq_ignore_ascii_case("content-length") {
+                            content_length = v.trim().parse::<usize>().unwrap_or(0);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(end) = header_end {
+            if buffer.len() >= end + content_length {
+                break;
+            }
+        }
+        if buffer.len() > 262_144 {
+            break;
+        }
     }
 
-    let req = String::from_utf8_lossy(&buf[..n]);
-    let first_line = req.lines().next().unwrap_or("");
-    let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+    let end = header_end?;
+    let header_str = String::from_utf8_lossy(&buffer[..end]);
+    let first_line = header_str.lines().next().unwrap_or("").to_string();
+    let body_bytes = &buffer[end..buffer.len().min(end + content_length)];
+    let body = String::from_utf8_lossy(body_bytes).into_owned();
+    Some((first_line, body))
+}
+
+fn handle_http_client(mut stream: TcpStream, config: Arc<Mutex<ImeConfig>>) {
+    let Some((first_line, body)) = read_http_request(&mut stream) else {
+        return;
+    };
 
     if first_line.starts_with("GET / ") || first_line.starts_with("GET /index.html") {
-        send_response(
-            &mut stream,
-            "200 OK",
-            "text/html; charset=utf-8",
-            WEBVIEW_HTML,
-        );
+        send_response(&mut stream, "200 OK", "text/html; charset=utf-8", WEBVIEW_HTML);
     } else if first_line.starts_with("GET /api/state") {
-        let cfg = config.lock().unwrap();
+        let mut cfg = config.lock().unwrap();
+        *cfg = ImeConfig::load_from_disk();
         let json = build_state_json(&cfg);
         send_response(&mut stream, "200 OK", "application/json", &json);
     } else if first_line.starts_with("POST /api/save") {
         let mut cfg = config.lock().unwrap();
-        update_config_from_form(&mut cfg, body);
+        update_config_from_form(&mut cfg, &body);
         let save_ok = cfg.save_to_disk().is_ok();
         reload_fcitx5_dbus();
         let msg = if save_ok {
-            r#"{"ok":true,"message":"Configuration saved and applied."}"#
+            format!(
+                r#"{{"ok":true,"smooth_mode":"{}","message":"Đã lưu cấu hình (Chế độ: {})"}}"#,
+                cfg.smooth_mode.as_str(),
+                cfg.smooth_mode.as_str()
+            )
         } else {
-            r#"{"ok":false,"message":"Failed to write configuration file."}"#
+            r#"{"ok":false,"message":"Không thể ghi tệp cấu hình!"}"#.to_string()
         };
-        send_response(&mut stream, "200 OK", "application/json", msg);
+        send_response(&mut stream, "200 OK", "application/json", &msg);
     } else if first_line.starts_with("POST /api/test") {
         let cfg = config.lock().unwrap().clone();
-        let raw_text = parse_form_field(body, "text").unwrap_or_default();
+        let raw_text = parse_form_field(&body, "text").unwrap_or_default();
         let mut engine = ImeEngine::new(cfg);
         let mut out = String::new();
         for ch in raw_text.chars() {
@@ -179,7 +240,7 @@ fn handle_http_client(mut stream: std::net::TcpStream, config: Arc<Mutex<ImeConf
             &mut stream,
             "200 OK",
             "application/json",
-            r#"{"ok":true,"message":"Fcitx5 daemon restarted."}"#,
+            r#"{"ok":true,"message":"Đã khởi động lại Fcitx5."}"#,
         );
     } else if first_line.starts_with("POST /api/uninstall") {
         let msg = uninstall_plugin_user_local();
@@ -190,7 +251,7 @@ fn handle_http_client(mut stream: std::net::TcpStream, config: Arc<Mutex<ImeConf
     }
 }
 
-fn send_response(stream: &mut std::net::TcpStream, status: &str, content_type: &str, body: &str) {
+fn send_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &str) {
     let header = format!(
         "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         status,
@@ -219,17 +280,50 @@ fn check_installation_status() -> (bool, bool, bool) {
     (user_installed, sys_installed, fcitx_running)
 }
 
-fn install_plugin_user_local() -> (bool, String) {
-    let status = Command::new("cargo")
-        .args(["build", "--release", "--features", "fcitx5-plugin"])
-        .status();
-
-    if !status.is_ok_and(|s| s.success()) {
-        return (
-            false,
-            "Build failed. Ensure Fcitx5 development headers (libfcitx5core-dev / fcitx5) are installed.".to_string(),
-        );
+fn locate_or_build_plugin_so() -> Result<PathBuf, String> {
+    if Path::new("Cargo.toml").exists() {
+        let status = Command::new("cargo")
+            .args(["build", "--release", "--features", "fcitx5-plugin"])
+            .status();
+        if status.is_ok_and(|s| s.success()) {
+            let built = PathBuf::from("target/release/libfcitx5_tregai.so");
+            if built.exists() {
+                return Ok(built);
+            }
+        }
     }
+
+    let mut candidates = vec![
+        PathBuf::from("target/release/libfcitx5_tregai.so"),
+        PathBuf::from("libfcitx5_tregai.so"),
+        PathBuf::from("/usr/lib/x86_64-linux-gnu/fcitx5/libfcitx5_tregai.so"),
+        PathBuf::from("/usr/lib/fcitx5/libfcitx5_tregai.so"),
+        PathBuf::from("/usr/lib64/fcitx5/libfcitx5_tregai.so"),
+    ];
+
+    if let Ok(exe) = env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.insert(0, parent.join("libfcitx5_tregai.so"));
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(
+        "Không tìm thấy libfcitx5_tregai.so đã biên dịch hoặc thư mục hiện tại không có Cargo.toml."
+            .to_string(),
+    )
+}
+
+fn install_plugin_user_local() -> (bool, String) {
+    let so_source = match locate_or_build_plugin_so() {
+        Ok(p) => p,
+        Err(e) => return (false, e),
+    };
 
     let Ok(home) = env::var("HOME") else {
         return (false, "HOME environment variable is not set.".to_string());
@@ -253,19 +347,21 @@ fn install_plugin_user_local() -> (bool, String) {
         }
     }
 
-    if let Err(e) = fs::copy(
-        "target/release/libfcitx5_tregai.so",
-        addon_lib_dir.join("libfcitx5_tregai.so"),
-    ) {
-        return (false, format!("Failed to copy shared library: {}", e));
+    let target_so = addon_lib_dir.join("libfcitx5_tregai.so");
+    if so_source != target_so {
+        if let Err(e) = fs::copy(&so_source, &target_so) {
+            return (false, format!("Failed to copy shared library: {}", e));
+        }
     }
 
-    let _ = fs::copy("data/tregai-addon.conf", addon_conf_dir.join("tregai.conf"));
-    let _ = fs::copy("data/tregai.conf", im_conf_dir.join("tregai.conf"));
+    let _ = fs::write(addon_conf_dir.join("tregai.conf"), ADDON_CONF_CONTENT);
+    let _ = fs::write(im_conf_dir.join("tregai.conf"), IM_CONF_CONTENT);
 
     if let Ok(exe) = env::current_exe() {
         let target_gui = bin_dir.join("tregai-gui");
-        let _ = fs::copy(&exe, &target_gui);
+        if exe != target_gui {
+            let _ = fs::copy(&exe, &target_gui);
+        }
         let desktop_content = format!(
             "[Desktop Entry]\nName=Tre Gai Input Method\nComment=Configure Tre Gai Vietnamese Input Method for Fcitx5\nExec={}\nIcon=input-keyboard\nTerminal=false\nType=Application\nCategories=Settings;Utility;\n",
             target_gui.display()
@@ -276,21 +372,15 @@ fn install_plugin_user_local() -> (bool, String) {
     let _ = Command::new("fcitx5").args(["-r", "-d"]).spawn();
     (
         true,
-        "Installed to ~/.local and restarted Fcitx5.".to_string(),
+        "Đã cài đặt vào ~/.local và khởi động lại Fcitx5.".to_string(),
     )
 }
 
 fn install_plugin_system_pkexec() -> (bool, String) {
-    let build_status = Command::new("cargo")
-        .args(["build", "--release", "--features", "fcitx5-plugin"])
-        .status();
-
-    if !build_status.is_ok_and(|s| s.success()) {
-        return (
-            false,
-            "Build failed. Ensure Fcitx5 development headers are installed.".to_string(),
-        );
-    }
+    let so_source = match locate_or_build_plugin_so() {
+        Ok(p) => p,
+        Err(e) => return (false, e),
+    };
 
     let libdir = Command::new("pkg-config")
         .args(["--variable=libdir", "Fcitx5Core"])
@@ -299,13 +389,27 @@ fn install_plugin_system_pkexec() -> (bool, String) {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/usr/lib".to_string());
+        .unwrap_or_else(|| {
+            if Path::new("/usr/lib/x86_64-linux-gnu/fcitx5").exists() {
+                "/usr/lib/x86_64-linux-gnu".to_string()
+            } else {
+                "/usr/lib".to_string()
+            }
+        });
+
+    let tmp_addon = "/tmp/tregai-addon.conf";
+    let tmp_im = "/tmp/tregai.conf";
+    let _ = fs::write(tmp_addon, ADDON_CONF_CONTENT);
+    let _ = fs::write(tmp_im, IM_CONF_CONTENT);
 
     let cmd = format!(
-        "install -Dm755 target/release/libfcitx5_tregai.so '{}/fcitx5/libfcitx5_tregai.so' && \
-         install -Dm644 data/tregai-addon.conf /usr/share/fcitx5/addon/tregai.conf && \
-         install -Dm644 data/tregai.conf /usr/share/fcitx5/inputmethod/tregai.conf",
-        libdir
+        "install -Dm755 '{}' '{}/fcitx5/libfcitx5_tregai.so' && \
+         install -Dm644 '{}' /usr/share/fcitx5/addon/tregai.conf && \
+         install -Dm644 '{}' /usr/share/fcitx5/inputmethod/tregai.conf",
+        so_source.display(),
+        libdir,
+        tmp_addon,
+        tmp_im
     );
 
     let pk = Command::new("pkexec").args(["sh", "-c", &cmd]).status();
@@ -314,12 +418,12 @@ fn install_plugin_system_pkexec() -> (bool, String) {
         (
             true,
             format!(
-                "Installed system-wide to {}/fcitx5 and restarted Fcitx5.",
+                "Đã cài đặt toàn hệ thống tại {}/fcitx5 và khởi động lại Fcitx5.",
                 libdir
             ),
         )
     } else {
-        (false, "System installation canceled or failed.".to_string())
+        (false, "Cài đặt hệ thống bị hủy hoặc thất bại.".to_string())
     }
 }
 
@@ -332,7 +436,7 @@ fn uninstall_plugin_user_local() -> String {
         let _ = fs::remove_file(h.join(".local/share/applications/tregai-gui.desktop"));
     }
     let _ = Command::new("fcitx5").args(["-r", "-d"]).spawn();
-    "Removed user-local installation from ~/.local.".to_string()
+    "Đã gỡ bản cài đặt tại ~/.local.".to_string()
 }
 
 fn reload_fcitx5_dbus() {
@@ -382,12 +486,15 @@ fn build_state_json(cfg: &ImeConfig) -> String {
         r#"{{
             "enabled": {},
             "method": "{}",
+            "charset": "{}",
             "smooth_mode": "{}",
             "commit_delay_ms": {},
             "underline_preedit": {},
             "modern_tone": {},
             "spell_check": {},
+            "auto_restore_english": {},
             "free_tone": {},
+            "w_to_u": {},
             "bracket_shortcuts": {},
             "quick_start_consonant": {},
             "quick_end_consonant": {},
@@ -395,6 +502,8 @@ fn build_state_json(cfg: &ImeConfig) -> String {
             "double_space_period": {},
             "allow_foreign_consonants": {},
             "enable_macros": {},
+            "macro_in_english_mode": {},
+            "excluded_apps": "{}",
             "macros": {},
             "status": {{
                 "user_installed": {},
@@ -404,12 +513,15 @@ fn build_state_json(cfg: &ImeConfig) -> String {
         }}"#,
         cfg.enabled,
         cfg.method.as_str(),
+        cfg.charset.as_str(),
         cfg.smooth_mode.as_str(),
         cfg.commit_delay_ms,
         cfg.underline_preedit,
         cfg.modern_tone,
         cfg.spell_check,
+        cfg.auto_restore_english,
         cfg.free_tone,
+        cfg.w_to_u,
         cfg.bracket_shortcuts,
         cfg.quick_start_consonant,
         cfg.quick_end_consonant,
@@ -417,6 +529,8 @@ fn build_state_json(cfg: &ImeConfig) -> String {
         cfg.double_space_period,
         cfg.allow_foreign_consonants,
         cfg.enable_macros,
+        cfg.macro_in_english_mode,
+        escape_json(&cfg.excluded_apps.join(", ")),
         macros_json,
         user_installed,
         sys_installed,
@@ -465,9 +579,16 @@ fn update_config_from_form(cfg: &mut ImeConfig, body: &str) {
     let get = |k: &str| parse_form_field(body, k);
     let get_bool = |k: &str| get(k).is_some_and(|v| v == "true" || v == "1");
 
+    if get("method").is_none() && get("smooth_mode").is_none() {
+        return;
+    }
+
     cfg.enabled = get_bool("enabled");
     if let Some(m) = get("method") {
         cfg.method = InputMethod::parse(&m);
+    }
+    if let Some(cs) = get("charset") {
+        cfg.charset = Charset::parse(&cs);
     }
     if let Some(sm) = get("smooth_mode") {
         cfg.smooth_mode = SmoothMode::parse(&sm);
@@ -478,7 +599,9 @@ fn update_config_from_form(cfg: &mut ImeConfig, body: &str) {
     cfg.underline_preedit = get_bool("underline_preedit");
     cfg.modern_tone = get_bool("modern_tone");
     cfg.spell_check = get_bool("spell_check");
+    cfg.auto_restore_english = get_bool("auto_restore_english");
     cfg.free_tone = get_bool("free_tone");
+    cfg.w_to_u = get_bool("w_to_u");
     cfg.bracket_shortcuts = get_bool("bracket_shortcuts");
     cfg.quick_start_consonant = get_bool("quick_start_consonant");
     cfg.quick_end_consonant = get_bool("quick_end_consonant");
@@ -486,6 +609,15 @@ fn update_config_from_form(cfg: &mut ImeConfig, body: &str) {
     cfg.double_space_period = get_bool("double_space_period");
     cfg.allow_foreign_consonants = get_bool("allow_foreign_consonants");
     cfg.enable_macros = get_bool("enable_macros");
+    cfg.macro_in_english_mode = get_bool("macro_in_english_mode");
+
+    if let Some(apps) = get("excluded_apps") {
+        cfg.excluded_apps = apps
+            .split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+    }
 
     if let Some(macros_raw) = get("macros_text") {
         let mut map = BTreeMap::new();
@@ -565,7 +697,7 @@ const WEBVIEW_HTML: &str = r#####"<!DOCTYPE html>
     border: 1px solid var(--border); border-radius: 6px; padding: 12px;
     cursor: pointer; background: #09090b; transition: border-color 0.12s;
   }
-  .mode-option.selected { border-color: var(--accent); background: rgba(37, 99, 235, 0.08); }
+  .mode-option.selected { border-color: var(--accent); background: rgba(37, 99, 235, 0.12); }
   .mode-option h3 { font-size: 13px; font-weight: 600; margin-bottom: 4px; color: var(--text); }
   .mode-option p { font-size: 12px; color: var(--muted); line-height: 1.4; }
   .options-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
@@ -582,7 +714,7 @@ const WEBVIEW_HTML: &str = r#####"<!DOCTYPE html>
     border-radius: 6px; padding: 8px 12px; font-size: 13px; outline: none;
   }
   select:focus, input[type="text"]:focus, textarea:focus { border-color: var(--accent); }
-  .control-bar { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 14px; }
+  .control-bar { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 14px; }
   .slider-row {
     margin-top: 12px; padding: 10px 12px; background: #09090b;
     border: 1px solid var(--border); border-radius: 6px;
@@ -621,22 +753,22 @@ const WEBVIEW_HTML: &str = r#####"<!DOCTYPE html>
 
   <div class="section">
     <div class="section-header">
-      <span class="section-title">Chế độ Xuất chữ & Tốc độ Phản hồi</span>
+      <span class="section-title">Chế độ Xuất chữ & Tốc độ Phản hồi (Bấm chọn để áp dụng ngay)</span>
     </div>
     <div class="mode-grid" id="smooth-cards">
-      <div class="mode-option" data-mode="ultra_smooth" onclick="selectSmoothMode('ultra_smooth')">
-        <h3>Ultra Smooth (0ms)</h3>
-        <p>Phản hồi tức thì qua Client Preedit. Chuẩn mặc định cho Wayland, GTK4 và Qt6.</p>
+      <div class="mode-option" data-mode="ultra_smooth" onclick="changeSmoothMode('ultra_smooth')">
+        <h3>Ultra Smooth (Preedit)</h3>
+        <p>Phản hồi 0ms qua Client Preedit. An toàn tuyệt đối cho Wayland, GTK4 và Qt6.</p>
       </div>
-      <div class="mode-option" data-mode="smooth" onclick="selectSmoothMode('smooth')">
-        <h3>Direct (Surrounding Text)</h3>
-        <p>Gõ trực tiếp không gạch chân qua Surrounding Text, tự động fallback khi cần.</p>
+      <div class="mode-option" data-mode="smooth" onclick="changeSmoothMode('smooth')">
+        <h3>Direct (Lotus / Backspace)</h3>
+        <p>Gõ trực tiếp không dùng Preedit qua Surrounding Text & Minimal Diff Backspace.</p>
       </div>
-      <div class="mode-option" data-mode="slow_compat" onclick="selectSmoothMode('slow_compat')">
+      <div class="mode-option" data-mode="slow_compat" onclick="changeSmoothMode('slow_compat')">
         <h3>Compatibility Delay</h3>
-        <p>Điều tiết nhịp xuất chữ cho các ứng dụng X11, Electron cũ hoặc Wine.</p>
+        <p>Chế độ Direct kèm nhịp trễ chống nuốt chữ cho X11, Electron cũ hoặc Wine.</p>
       </div>
-      <div class="mode-option" data-mode="gaming" onclick="selectSmoothMode('gaming')">
+      <div class="mode-option" data-mode="gaming" onclick="changeSmoothMode('gaming')">
         <h3>Gaming Mode</h3>
         <p>Tắt biến đổi phím W đơn lẻ ở đầu từ để bảo toàn cụm phím di chuyển WASD.</p>
       </div>
@@ -648,29 +780,37 @@ const WEBVIEW_HTML: &str = r#####"<!DOCTYPE html>
         <strong id="delay-label" style="color:var(--text);">15 ms</strong>
       </div>
       <input type="range" id="commit_delay_ms" min="0" max="100" value="15" style="width:100%; margin-top:6px;"
-             oninput="document.getElementById('delay-label').innerText = this.value + ' ms'">
+             oninput="document.getElementById('delay-label').innerText = this.value + ' ms'"
+             onchange="saveConfig()">
     </div>
   </div>
 
   <div class="section">
     <div class="section-header">
-      <span class="section-title">Kiểu gõ & Quy tắc Ngôn ngữ</span>
+      <span class="section-title">Kiểu gõ, Bảng mã & Quy tắc Ngôn ngữ (Chuẩn Lotus)</span>
       <button class="btn-primary" onclick="saveConfig()">Lưu & Áp dụng</button>
     </div>
 
     <div class="control-bar">
-      <div style="flex:1;">
+      <div>
         <label style="font-size:12px; color:var(--muted); display:block; margin-bottom:4px;">Phương pháp nhập liệu</label>
-        <select id="method" onchange="runSandboxTest()">
+        <select id="method" onchange="saveConfig()">
           <option value="telex">Telex</option>
           <option value="simple_telex">Simple Telex</option>
           <option value="vni">VNI</option>
           <option value="viqr">VIQR</option>
         </select>
       </div>
+      <div>
+        <label style="font-size:12px; color:var(--muted); display:block; margin-bottom:4px;">Bảng mã đầu ra (Charset)</label>
+        <select id="charset" onchange="saveConfig()">
+          <option value="unicode">Unicode (UTF-8 Dựng sẵn - NFC)</option>
+          <option value="unicode_composite">Unicode Tổ hợp (NFD)</option>
+        </select>
+      </div>
     </div>
 
-    <div class="options-grid">
+    <div class="options-grid" onchange="saveConfig()">
       <div class="option-row">
         <div><span class="label">Bật bộ gõ Tiếng Việt</span><span class="desc">Phím tắt chuyển nhanh: Ctrl + Shift + S</span></div>
         <input type="checkbox" id="enabled">
@@ -684,12 +824,20 @@ const WEBVIEW_HTML: &str = r#####"<!DOCTYPE html>
         <input type="checkbox" id="modern_tone">
       </div>
       <div class="option-row">
-        <div><span class="label">Kiểm tra chính tả & Khôi phục tiếng Anh</span><span class="desc">Tự động khôi phục các âm tiết không hợp lệ</span></div>
+        <div><span class="label">Kiểm tra chính tả Tiếng Việt</span><span class="desc">Nhận diện cấu trúc âm tiết hợp lệ</span></div>
         <input type="checkbox" id="spell_check">
+      </div>
+      <div class="option-row">
+        <div><span class="label">Tự động khôi phục từ Tiếng Anh</span><span class="desc">Hoàn trả phím gốc khi âm tiết sai chính tả</span></div>
+        <input type="checkbox" id="auto_restore_english">
       </div>
       <div class="option-row">
         <div><span class="label">Bỏ dấu tự do</span><span class="desc">Cho phép nhập dấu thanh ở bất kỳ vị trí nào trong từ</span></div>
         <input type="checkbox" id="free_tone">
+      </div>
+      <div class="option-row">
+        <div><span class="label">Biến đổi W thành Ư ở đầu âm tiết</span><span class="desc">Hỗ trợ gõ w → ư, nhw → như trong Telex</span></div>
+        <input type="checkbox" id="w_to_u">
       </div>
       <div class="option-row">
         <div><span class="label">Phím tắt ngoặc vuông ([ → ơ, ] → ư)</span><span class="desc">Áp dụng cho phương pháp gõ Telex</span></div>
@@ -719,6 +867,15 @@ const WEBVIEW_HTML: &str = r#####"<!DOCTYPE html>
         <div><span class="label">Kích hoạt bảng gõ tắt (Macros)</span><span class="desc">Mở rộng từ viết tắt khi kết thúc từ</span></div>
         <input type="checkbox" id="enable_macros">
       </div>
+      <div class="option-row">
+        <div><span class="label">Cho phép gõ tắt cả khi tắt Tiếng Việt</span><span class="desc">Hoạt động giống chế độ Macro in English của Lotus</span></div>
+        <input type="checkbox" id="macro_in_english_mode">
+      </div>
+    </div>
+
+    <div style="margin-top: 14px;">
+      <label style="font-size:12px; color:var(--muted); display:block; margin-bottom:4px;">Danh sách ứng dụng tự động bỏ qua / tắt bộ gõ (phân cách bằng dấu phẩy)</label>
+      <input type="text" id="excluded_apps" placeholder="steam, cs2, dota2, lutris" onchange="saveConfig()">
     </div>
   </div>
 
@@ -756,7 +913,7 @@ function notify(msg) {
   const el = document.getElementById('notification');
   el.innerText = msg;
   el.style.display = 'block';
-  setTimeout(() => { el.style.display = 'none'; }, 3000);
+  setTimeout(() => { el.style.display = 'none'; }, 2800);
 }
 
 function selectSmoothMode(mode) {
@@ -766,19 +923,27 @@ function selectSmoothMode(mode) {
   });
 }
 
+async function changeSmoothMode(mode) {
+  selectSmoothMode(mode);
+  await saveConfig();
+}
+
 async function loadState() {
   const res = await fetch('/api/state');
   const data = await res.json();
 
   document.getElementById('enabled').checked = data.enabled;
   document.getElementById('method').value = data.method;
+  document.getElementById('charset').value = data.charset;
   selectSmoothMode(data.smooth_mode);
   document.getElementById('commit_delay_ms').value = data.commit_delay_ms;
   document.getElementById('delay-label').innerText = data.commit_delay_ms + ' ms';
   document.getElementById('underline_preedit').checked = data.underline_preedit;
   document.getElementById('modern_tone').checked = data.modern_tone;
   document.getElementById('spell_check').checked = data.spell_check;
+  document.getElementById('auto_restore_english').checked = data.auto_restore_english;
   document.getElementById('free_tone').checked = data.free_tone;
+  document.getElementById('w_to_u').checked = data.w_to_u;
   document.getElementById('bracket_shortcuts').checked = data.bracket_shortcuts;
   document.getElementById('quick_start_consonant').checked = data.quick_start_consonant;
   document.getElementById('quick_end_consonant').checked = data.quick_end_consonant;
@@ -786,6 +951,8 @@ async function loadState() {
   document.getElementById('double_space_period').checked = data.double_space_period;
   document.getElementById('allow_foreign_consonants').checked = data.allow_foreign_consonants;
   document.getElementById('enable_macros').checked = data.enable_macros;
+  document.getElementById('macro_in_english_mode').checked = data.macro_in_english_mode;
+  document.getElementById('excluded_apps').value = data.excluded_apps;
 
   document.getElementById('macros_text').value = data.macros.map(m => `${m.key} = ${m.val}`).join('\n');
 
@@ -814,12 +981,15 @@ async function saveConfig() {
   const params = new URLSearchParams();
   params.set('enabled', document.getElementById('enabled').checked);
   params.set('method', document.getElementById('method').value);
+  params.set('charset', document.getElementById('charset').value);
   params.set('smooth_mode', currentSmoothMode);
   params.set('commit_delay_ms', document.getElementById('commit_delay_ms').value);
   params.set('underline_preedit', document.getElementById('underline_preedit').checked);
   params.set('modern_tone', document.getElementById('modern_tone').checked);
   params.set('spell_check', document.getElementById('spell_check').checked);
+  params.set('auto_restore_english', document.getElementById('auto_restore_english').checked);
   params.set('free_tone', document.getElementById('free_tone').checked);
+  params.set('w_to_u', document.getElementById('w_to_u').checked);
   params.set('bracket_shortcuts', document.getElementById('bracket_shortcuts').checked);
   params.set('quick_start_consonant', document.getElementById('quick_start_consonant').checked);
   params.set('quick_end_consonant', document.getElementById('quick_end_consonant').checked);
@@ -827,10 +997,19 @@ async function saveConfig() {
   params.set('double_space_period', document.getElementById('double_space_period').checked);
   params.set('allow_foreign_consonants', document.getElementById('allow_foreign_consonants').checked);
   params.set('enable_macros', document.getElementById('enable_macros').checked);
+  params.set('macro_in_english_mode', document.getElementById('macro_in_english_mode').checked);
+  params.set('excluded_apps', document.getElementById('excluded_apps').value);
   params.set('macros_text', document.getElementById('macros_text').value);
 
-  const res = await fetch('/api/save', { method: 'POST', body: params.toString() });
+  const res = await fetch('/api/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+    body: params.toString()
+  });
   const data = await res.json();
+  if (data.smooth_mode) {
+    selectSmoothMode(data.smooth_mode);
+  }
   notify(data.message);
   runSandboxTest();
 }
@@ -838,7 +1017,11 @@ async function saveConfig() {
 async function runSandboxTest() {
   const params = new URLSearchParams();
   params.set('text', document.getElementById('sandbox-in').value);
-  const res = await fetch('/api/test', { method: 'POST', body: params.toString() });
+  const res = await fetch('/api/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+    body: params.toString()
+  });
   const data = await res.json();
   document.getElementById('sandbox-out').value = data.result;
 }
