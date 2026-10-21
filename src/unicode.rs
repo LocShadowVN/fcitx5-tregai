@@ -19,6 +19,28 @@ pub enum Tone {
     Dot = 5,   // Nặng
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Charset {
+    Unicode,          // UTF-8 NFC (Dựng sẵn)
+    UnicodeComposite, // UTF-8 NFD (Tổ hợp)
+}
+
+impl Charset {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unicode => "unicode",
+            Self::UnicodeComposite => "unicode_composite",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "unicode_composite" | "composite" | "nfd" => Self::UnicodeComposite,
+            _ => Self::Unicode,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Glyph {
     pub base: char,
@@ -72,6 +94,39 @@ impl Glyph {
             ch.to_uppercase().next().unwrap_or(ch)
         } else {
             ch
+        }
+    }
+
+    pub fn render_with_charset(&self, tone: Tone, charset: Charset) -> String {
+        match charset {
+            Charset::Unicode => self.render(tone).to_string(),
+            Charset::UnicodeComposite => {
+                if self.base == 'd' {
+                    return self.render(Tone::None).to_string();
+                }
+                let mut out = String::with_capacity(6);
+                let base_ch = if self.uppercase {
+                    self.base.to_ascii_uppercase()
+                } else {
+                    self.base
+                };
+                out.push(base_ch);
+                match self.vmod {
+                    VowelMod::Circumflex => out.push('\u{0302}'),
+                    VowelMod::Breve => out.push('\u{0306}'),
+                    VowelMod::Horn => out.push('\u{031B}'),
+                    VowelMod::None => {}
+                }
+                match tone {
+                    Tone::Acute => out.push('\u{0301}'),
+                    Tone::Grave => out.push('\u{0300}'),
+                    Tone::Hook => out.push('\u{0309}'),
+                    Tone::Tilde => out.push('\u{0303}'),
+                    Tone::Dot => out.push('\u{0323}'),
+                    Tone::None => {}
+                }
+                out
+            }
         }
     }
 
