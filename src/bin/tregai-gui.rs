@@ -186,7 +186,12 @@ fn handle_http_client(mut stream: TcpStream, config: Arc<Mutex<ImeConfig>>) {
     };
 
     if first_line.starts_with("GET / ") || first_line.starts_with("GET /index.html") {
-        send_response(&mut stream, "200 OK", "text/html; charset=utf-8", WEBVIEW_HTML);
+        send_response(
+            &mut stream,
+            "200 OK",
+            "text/html; charset=utf-8",
+            WEBVIEW_HTML,
+        );
     } else if first_line.starts_with("GET /api/state") {
         let mut cfg = config.lock().unwrap();
         *cfg = ImeConfig::load_from_disk();
