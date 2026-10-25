@@ -574,7 +574,10 @@ fn locate_or_build_shared_library() -> Result<PathBuf, String> {
 
 fn install_user_local() -> (bool, String) {
     let Ok(home) = env::var("HOME") else {
-        return (false, "Biến môi trường HOME chưa được thiết lập.".to_string());
+        return (
+            false,
+            "Biến môi trường HOME chưa được thiết lập.".to_string(),
+        );
     };
     let so_path = match locate_or_build_shared_library() {
         Ok(p) => p,
