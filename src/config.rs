@@ -290,11 +290,30 @@ impl ImeConfig {
     }
 
     pub fn is_app_excluded(&self, app_name: &str) -> bool {
-        if app_name.is_empty() {
+        let trimmed = app_name.trim();
+        if trimmed.is_empty() {
             return false;
         }
-        let lower = app_name.trim().to_ascii_lowercase();
-        self.excluded_apps.iter().any(|item| item == &lower)
+        let lower = trimmed.to_ascii_lowercase();
+        let exec_token = lower.split_whitespace().next().unwrap_or(&lower);
+        let basename = exec_token.rsplit('/').next().unwrap_or(exec_token);
+        let stripped = basename
+            .strip_suffix(".exe")
+            .or_else(|| basename.strip_suffix(".sh"))
+            .or_else(|| basename.strip_suffix(".bin"))
+            .or_else(|| basename.strip_suffix("-bin"))
+            .or_else(|| basename.strip_suffix("-runtime"))
+            .unwrap_or(basename);
+        let flatpak_tail = basename.rsplit('.').next().unwrap_or(basename);
+
+        self.excluded_apps.iter().any(|rule| {
+            let r = rule.trim().to_ascii_lowercase();
+            !r.is_empty()
+                && (r == lower
+                    || r == basename
+                    || r == stripped
+                    || r == flatpak_tail)
+        })
     }
 
     pub fn expand_macro(&self, word: &str) -> Option<String> {
@@ -325,5 +344,35 @@ impl ImeConfig {
         } else {
             Some(target.clone())
         }
+    }
+
+    /// Nhập danh sách từ gõ tắt theo định dạng chuẩn của Unikey (`key:value` hoặc `key=value`).
+    pub fn import_unikey_macros(&mut self, content: &str) -> usize {
+        let mut count = 0;
+        for raw_line in content.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+                continue;
+            }
+            let pair = line.split_once(':').or_else(|| line.split_once('='));
+            if let Some((k, v)) = pair {
+                let key = k.trim().to_lowercase();
+                let val = v.trim();
+                if !key.is_empty() && !val.is_empty() {
+                    self.macros.insert(key, val.to_string());
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Xuất danh sách từ gõ tắt ra định dạng tương thích Unikey.
+    pub fn export_unikey_macros(&self) -> String {
+        let mut out = String::from("; DO NOT DELETE THIS LINE***version=1 ***\n");
+        for (k, v) in &self.macros {
+            out.push_str(&format!("{}:{}\n", k, v));
+        }
+        out
     }
 }
