@@ -17,7 +17,7 @@ const VALID_INITIALS: &[&str] = &[
 
 const FOREIGN_INITIALS: &[&str] = &[
     "f", "j", "w", "z", "br", "cl", "cr", "dr", "fl", "fr", "gl", "gr", "pl", "pr", "sc", "sh",
-    "sl", "sm", "sp", "st", "str", "sw", "tr",
+    "sl", "sm", "sp", "st", "str", "sw", "tr", "wh", "wr",
 ];
 
 const VALID_FINALS: &[&str] = &["", "c", "ch", "m", "n", "ng", "nh", "p", "t"];
@@ -25,13 +25,45 @@ const VALID_FINALS: &[&str] = &["", "c", "ch", "m", "n", "ng", "nh", "p", "t"];
 const OPEN_VOWEL_CLUSTERS: &[&str] = &[
     "a", "e", "ê", "i", "o", "ô", "ơ", "u", "ư", "y", "ai", "ao", "au", "ay", "âu", "ây", "eo",
     "êu", "ia", "iu", "oa", "oe", "oi", "ôi", "ơi", "ua", "ui", "ưi", "ưa", "ưu", "uơ", "ươ", "uy",
-    "uê", "oo", "iêu", "yêu", "oai", "oay", "oao", "uôi", "ươi", "ươu", "uya", "uyu", "uây",
+    "uê", "oo", "iêu", "yêu", "oai", "oay", "oao", "oeo", "uôi", "ươi", "ươu", "uya", "uyu", "uây",
 ];
 
 const CLOSED_VOWEL_CLUSTERS: &[&str] = &[
-    "a", "ă", "â", "e", "ê", "i", "o", "ô", "ơ", "u", "ư", "y", "iê", "yê", "ia", "ua", "uâ", "uô",
-    "ươ", "oa", "oă", "oe", "uê", "uy", "oo", "uyê",
+    "a", "ă", "â", "e", "ê", "i", "o", "ô", "ơ", "u", "ư", "y", "iê", "yê", "uâ", "uô", "ươ", "oa",
+    "oă", "oe", "uê", "uy", "oo", "uyê",
 ];
+
+/// Danh sách từ vựng tiếng Anh thông dụng có chuỗi phím trùng với bộ quy tắc Telex/VNI
+/// (được sắp xếp tăng dần theo thứ tự từ điển để tìm kiếm nhị phân O(log N)).
+const COMMON_ENGLISH_WORDS: &[&str] = &[
+    "add", "ads", "all", "aws", "bass", "beef", "beer", "bios", "book", "boot", "boss", "box",
+    "buff", "bus", "cell", "cent", "class", "cool", "cross", "cuff", "dead", "deed", "deep",
+    "deer", "default", "defend", "demand", "depend", "diff", "discord", "door", "download",
+    "dress", "egg", "export", "false", "feed", "feel", "feet", "file", "filter", "final", "find",
+    "fire", "first", "fix", "float", "floor", "flow", "focus", "folder", "food", "for", "force",
+    "form", "format", "fox", "free", "fresh", "from", "front", "full", "gas", "gear", "gem",
+    "gene", "get", "git", "glass", "good", "grass", "heel", "his", "house", "ill", "import", "is",
+    "jar", "jaw", "jet", "job", "join", "json", "jump", "just", "keep", "kernel", "key", "kiss",
+    "law", "less", "linux", "look", "loop", "loss", "low", "lower", "mass", "master", "max",
+    "meet", "mess", "method", "mix", "mode", "module", "moon", "need", "net", "network", "new",
+    "next", "noon", "now", "number", "object", "odd", "off", "os", "pass", "peel", "peer", "pool",
+    "poor", "power", "press", "public", "puff", "pull", "python", "raw", "reel", "return", "roll",
+    "root", "row", "rust", "saw", "search", "see", "seed", "seek", "select", "server", "sex",
+    "show", "six", "slow", "snow", "soon", "source", "staff", "static", "status", "stiff",
+    "stream", "string", "struct", "stuff", " sudo", "switch", "system", "tax", "text", "tool",
+    "tower", "tree", "user", "vex", "view", "was", "water", "wax", "wayland", "web", "week",
+    "well", "went", "west", "what", "when", "where", "which", "while", "who", "why", "widget",
+    "wifi", "win", "window", "windows", "with", "word", "work", "world", "write", "wrong", "www",
+    "yes", "zoom",
+];
+
+pub fn is_known_english_lexeme(raw_word: &str) -> bool {
+    if raw_word.len() < 2 {
+        return false;
+    }
+    let lower = raw_word.to_ascii_lowercase();
+    COMMON_ENGLISH_WORDS.binary_search(&lower.as_str()).is_ok()
+}
 
 pub fn analyze_syllable(glyphs: &[Glyph]) -> SyllableAnalysis {
     let len = glyphs.len();
@@ -172,61 +204,4 @@ pub fn find_tone_position(glyphs: &[Glyph], modern_tone: bool) -> Option<usize> 
                 Some(v_start)
             };
         }
-        return Some(v_start);
-    }
-
-    Some(v_start + 1)
-}
-
-pub fn is_valid_vietnamese_syllable(glyphs: &[Glyph], tone: Tone, allow_foreign: bool) -> bool {
-    if glyphs.is_empty() {
-        return false;
-    }
-
-    let analysis = analyze_syllable(glyphs);
-    if !analysis.is_structure_valid || analysis.vowel_range.is_empty() {
-        return false;
-    }
-
-    let mut initial = String::with_capacity(4);
-    for g in &glyphs[analysis.initial_range] {
-        if g.base == 'd' && g.d_stroke {
-            initial.push('đ');
-        } else {
-            initial.push(g.base);
-        }
-    }
-    let valid_init = VALID_INITIALS.contains(&initial.as_str())
-        || (allow_foreign && FOREIGN_INITIALS.contains(&initial.as_str()));
-    if !valid_init {
-        return false;
-    }
-
-    let mut final_cons = String::with_capacity(4);
-    for g in &glyphs[analysis.final_range] {
-        if g.d_stroke {
-            return false;
-        }
-        final_cons.push(g.base);
-    }
-    if !VALID_FINALS.contains(&final_cons.as_str()) {
-        return false;
-    }
-
-    if matches!(final_cons.as_str(), "c" | "ch" | "p" | "t")
-        && !matches!(tone, Tone::Acute | Tone::Dot)
-    {
-        return false;
-    }
-
-    let mut vowel_cluster = String::with_capacity(6);
-    for g in &glyphs[analysis.vowel_range] {
-        vowel_cluster.push(g.modded_vowel_char());
-    }
-
-    if final_cons.is_empty() {
-        OPEN_VOWEL_CLUSTERS.contains(&vowel_cluster.as_str())
-    } else {
-        CLOSED_VOWEL_CLUSTERS.contains(&vowel_cluster.as_str())
-    }
-}
+        return Some(v_sta
