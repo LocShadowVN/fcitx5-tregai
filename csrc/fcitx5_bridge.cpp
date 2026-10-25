@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <chrono>
-#include <cstdint>
-#include <cstring>
 #include <fcitx-utils/capabilityflags.h>
 #include <fcitx-utils/key.h>
 #include <fcitx-utils/keysym.h>
@@ -15,9 +12,8 @@
 #include <fcitx/inputpanel.h>
 #include <fcitx/instance.h>
 #include <fcitx/text.h>
-#include <fcitx/userinterface.h>
 #include <string>
-#include <thread>
+#include <cstring>
 
 extern "C" {
 struct VietImeContext;
@@ -74,36 +70,38 @@ public:
         instance_->inputContextManager().registerProperty("treGaiState", &factory_);
     }
 
-    void activate(const fcitx::InputMethodEntry &,
-                  fcitx::InputContextEvent &event) override {
+    void activate(const fcitx::InputMethodEntry &, fcitx::InputContextEvent &event) override {
         auto *ic = event.inputContext();
         auto *state = ic->propertyFor(&factory_);
         viet_ime_context_set_program(state->ctx(), ic->program().c_str());
         viet_ime_context_reset(state->ctx());
     }
 
-    void deactivate(const fcitx::InputMethodEntry &entry,
-                    fcitx::InputContextEvent &event) override {
+    void deactivate(const fcitx::InputMethodEntry &entry, fcitx::InputContextEvent &event) override {
         auto *ic = event.inputContext();
         auto *state = ic->propertyFor(&factory_);
-        if (event.type() == fcitx::EventType::InputContextFocusOut) {
-            FfiKeyResult flushed = viet_ime_context_flush(state->ctx());
-            applyResultToContext(ic, flushed);
-            viet_ime_free_result(flushed);
-        }
+        // Flush bất kể là đổi Input Method hay mất focus
+        FfiKeyResult flushed = viet_ime_context_flush(state->ctx());
+        applyResultToContext(ic, flushed);
+        viet_ime_free_result(flushed);
         reset(entry, event);
     }
 
-    void keyEvent(const fcitx::InputMethodEntry &,
-                  fcitx::KeyEvent &keyEvent) override {
+    void keyEvent(const fcitx::InputMethodEntry &, fcitx::KeyEvent &keyEvent) override {
         auto *ic = keyEvent.inputContext();
         auto *state = ic->propertyFor(&factory_);
 
         viet_ime_context_set_program(state->ctx(), ic->program().c_str());
 
+        // Chuẩn hóa keysym: nếu là phím Numpad số (0xffb0 -> 0xffb9), ánh xạ về ASCII '0' -> '9'
+        uint32_t sym = static_cast<uint32_t>(keyEvent.key().sym());
+        if (sym >= FcitxKey_KP_0 && sym <= FcitxKey_KP_9) {
+            sym = '0' + (sym - FcitxKey_KP_0);
+        }
+
         FfiKeyResult res = viet_ime_context_process_key(
             state->ctx(),
-            static_cast<uint32_t>(keyEvent.key().sym()),
+            sym,
             static_cast<uint32_t>(keyEvent.key().states()),
             keyEvent.isRelease());
 
@@ -116,8 +114,7 @@ public:
         viet_ime_free_result(res);
     }
 
-    void reset(const fcitx::InputMethodEntry &,
-               fcitx::InputContextEvent &event) override {
+    void reset(const fcitx::InputMethodEntry &, fcitx::InputContextEvent &event) override {
         auto *ic = event.inputContext();
         auto *state = ic->propertyFor(&factory_);
         viet_ime_context_reset(state->ctx());
@@ -138,10 +135,12 @@ private:
             updatePreeditPanel(ic, nullptr, false);
 
             if (res.backspace_count > 0) {
-                if (ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
-                    ic->deleteSurroundingText(
-                        -static_cast<int>(res.backspace_count),
-                        res.backspace_count);
+                // Kiểm tra SurroundingText hợp lệ trước khi xóa
+                bool surroundingValid = ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) &&
+                                        ic->surroundingText().isValid();
+
+                if (surroundingValid) {
+                    ic->deleteSurroundingText(-static_cast<int>(res.backspace_count), res.backspace_count);
                 } else {
                     const fcitx::Key bsKey(FcitxKey_BackSpace);
                     for (uint32_t i = 0; i < res.backspace_count; ++i) {
@@ -151,37 +150,23 @@ private:
                 }
             }
 
-            if (res.commit_delay_ms > 0 && (res.backspace_count > 0 || res.commit_text)) {
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(res.commit_delay_ms));
-            }
-
             if (res.commit_text && res.commit_text[0] != '\0') {
                 ic->commitString(res.commit_text);
             }
         } else {
-            if (res.commit_delay_ms > 0 && res.commit_text) {
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(res.commit_delay_ms));
-            }
-
             if (res.commit_text && res.commit_text[0] != '\0') {
                 ic->commitString(res.commit_text);
             }
-
             updatePreeditPanel(ic, res.preedit_text, res.underline_preedit);
         }
     }
 
-    static void updatePreeditPanel(fcitx::InputContext *ic,
-                                   const char *preedit_str,
-                                   bool underline) {
+    static void updatePreeditPanel(fcitx::InputContext *ic, const char *preedit_str, bool underline) {
         auto &panel = ic->inputPanel();
         panel.reset();
 
         if (preedit_str && preedit_str[0] != '\0') {
-            auto fmt = underline ? fcitx::TextFormatFlag::Underline
-                                 : fcitx::TextFormatFlag::NoFlag;
+            auto fmt = underline ? fcitx::TextFormatFlag::Underline : fcitx::TextFormatFlag::NoFlag;
             fcitx::Text preedit(preedit_str, fmt);
             preedit.setCursor(static_cast<int>(std::strlen(preedit_str)));
             if (ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
