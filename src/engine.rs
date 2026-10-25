@@ -2,7 +2,7 @@
 
 use crate::config::{ImeConfig, InputMethod, SmoothMode};
 use crate::syllable::{
-    analyze_syllable, find_tone_position, has_valid_vietnamese_initial, is_known_english_lexeme,
+    analyze_syllable, find_tone_position, has_valid_vietnamese_initial,
     is_valid_vietnamese_syllable,
 };
 use crate::unicode::{Glyph, Tone, VowelMod};
@@ -138,11 +138,11 @@ impl ImeEngine {
             && self.config.auto_restore_english
             && self.transformed
             && !matches!(self.last_action, LastAction::EscapedSingleW { .. })
-            && (!is_valid_vietnamese_syllable(
+            && !is_valid_vietnamese_syllable(
                 &self.glyphs,
                 self.tone,
                 self.config.allow_foreign_consonants,
-            ) || (raw.len() >= 3 && is_known_english_lexeme(&raw) && raw != rendered))
+            )
         {
             raw
         } else {
@@ -704,6 +704,7 @@ impl ImeEngine {
             return false;
         }
 
+        let v_end = analysis.vowel_range.end;
         let search_range = if self.config.free_tone {
             analysis.vowel_range
         } else {
@@ -713,6 +714,14 @@ impl ImeEngine {
 
         for idx in search_range.rev() {
             if self.glyphs[idx].base == target_base {
+                // Trong tiếng Việt không tồn tại vần *ôa hay *ôe; khi 'o' đứng trước 'a'/'e'
+                // thì phím 'o' tiếp theo được ghép vào cuối để tạo vần 'oao' / 'oeo' (như ngoào, ngoèo).
+                if target_base == 'o'
+                    && idx + 1 < v_end
+                    && matches!(self.glyphs[idx + 1].base, 'a' | 'e')
+                {
+                    return false;
+                }
                 if self.glyphs[idx].vmod == VowelMod::Circumflex {
                     return false;
                 }
