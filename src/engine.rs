@@ -493,16 +493,41 @@ impl ImeEngine {
         }
     }
 
+    fn sync_raw_keys_with_glyphs(&mut self) {
+        if self.tone == Tone::None
+            && self
+                .glyphs
+                .iter()
+                .all(|g| g.vmod == VowelMod::None && !g.d_stroke)
+        {
+            self.raw_keys = self
+                .glyphs
+                .iter()
+                .map(|g| {
+                    if g.uppercase {
+                        g.base.to_ascii_uppercase()
+                    } else {
+                        g.base
+                    }
+                })
+                .collect();
+            self.transformed = false;
+        }
+    }
+
     fn try_undo_double_key(&mut self, ch: char) -> bool {
         let lower = ch.to_ascii_lowercase();
         let action = self.last_action.clone();
 
         match action {
-            LastAction::ToneApplied { trigger, .. } if trigger == lower => {
+            LastAction::ToneApplied { prev_tone, trigger } if trigger == lower => {
                 self.tone = Tone::None;
                 self.glyphs.push(Glyph::new(ch));
                 self.locked.tone = true;
                 self.last_action = LastAction::None;
+                if prev_tone != Tone::None {
+                    self.sync_raw_keys_with_glyphs();
+                }
                 true
             }
             LastAction::DStrokeApplied { index, trigger } if trigger == lower => {
@@ -714,8 +739,6 @@ impl ImeEngine {
 
         for idx in search_range.rev() {
             if self.glyphs[idx].base == target_base {
-                // Trong tiếng Việt không tồn tại vần *ôa hay *ôe; khi 'o' đứng trước 'a'/'e'
-                // thì phím 'o' tiếp theo được ghép vào cuối để tạo vần 'oao' / 'oeo' (như ngoào, ngoèo).
                 if target_base == 'o'
                     && idx + 1 < v_end
                     && matches!(self.glyphs[idx + 1].base, 'a' | 'e')
