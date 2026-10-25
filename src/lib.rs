@@ -12,7 +12,7 @@ mod tests {
     use crate::engine::ImeEngine;
     use crate::ffi::{
         viet_ime_context_free, viet_ime_context_new, viet_ime_context_process_key,
-        viet_ime_context_set_program, viet_ime_free_result,
+        viet_ime_context_set_capabilities, viet_ime_context_set_program, viet_ime_free_result,
     };
     use std::ffi::{CStr, CString};
 
@@ -20,6 +20,10 @@ mod tests {
         let mut output = String::new();
         for ch in input.chars() {
             let res = engine.process_char(ch);
+            let extra_bs = engine.take_pending_backspaces();
+            for _ in 0..extra_bs {
+                output.pop();
+            }
             if let Some(committed) = res.commit {
                 output.push_str(&committed);
             } else if !res.handled {
@@ -112,12 +116,17 @@ mod tests {
         assert_eq!(simulate_typing(&mut engine, "fog "), "phong ");
         assert_eq!(simulate_typing(&mut engine, "jaf "), "già ");
         assert_eq!(simulate_typing(&mut engine, "was "), "quá ");
+        assert_eq!(simulate_typing(&mut engine, "FAS "), "PHÁ ");
         assert_eq!(simulate_typing(&mut engine, "nhah "), "nhanh ");
         assert_eq!(simulate_typing(&mut engine, "saks "), "sách ");
 
         assert_eq!(
             simulate_typing(&mut engine, "xin chaof. vieetj nam"),
             "xin chào. Việt nam"
+        );
+        assert_eq!(
+            simulate_typing(&mut engine, "xin chaof  vieetj"),
+            "xin chào. Việt"
         );
     }
 
@@ -176,14 +185,19 @@ mod tests {
     }
 
     #[test]
-    fn test_english_auto_restore() {
+    fn test_english_auto_restore_and_www() {
         let mut engine = ImeEngine::new(ImeConfig::default());
-        let words = "windows linux text next class staff free struct string user house focus";
+        let words =
+            "windows linux text next class staff free struct string user house focus david pass boss off www.google.com with what where when web work world";
         assert_eq!(simulate_typing(&mut engine, words), words);
+        assert_eq!(simulate_typing(&mut engine, "ww "), "w ");
+        assert_eq!(simulate_typing(&mut engine, "ngoeof khoeof"), "ngoèo khoèo");
+        assert_eq!(simulate_typing(&mut engine, "toansf"), "toàn");
+        assert_eq!(simulate_typing(&mut engine, "toansff"), "toanf");
     }
 
     #[test]
-    fn test_ffi_direct_smooth_mode_and_excluded_apps() {
+    fn test_ffi_direct_smooth_mode_numpad_and_excluded_apps() {
         unsafe {
             let ctx = viet_ime_context_new();
             assert!(!ctx.is_null());
@@ -204,7 +218,26 @@ mod tests {
             }
             assert_eq!(screen, "việt ");
 
-            let prog = CString::new("steam").unwrap();
+            // Kiểm tra tự động chuyển sang Preedit không gạch chân khi thiếu SurroundingText
+            viet_ime_context_set_capabilities(ctx, true, false);
+            let res_preedit = viet_ime_context_process_key(ctx, b'a' as u32, 0, false);
+            assert!(res_preedit.handled);
+            assert!(!res_preedit.direct_mode);
+            assert!(!res_preedit.underline_preedit);
+            viet_ime_free_result(res_preedit);
+
+            // Kiểm tra Numpad 0-9 (0xffb0..=0xffb9) trong chế độ VNI
+            (*ctx).engine.clear();
+            (*ctx).engine.config.method = InputMethod::Vni;
+            let _ = viet_ime_context_process_key(ctx, b'a' as u32, 0, false);
+            let res_kp1 = viet_ime_context_process_key(ctx, 0xffb1, 0, false); // KP_1 -> sắc
+            assert!(res_kp1.handled);
+            let preedit_str = CStr::from_ptr(res_kp1.preedit_text).to_str().unwrap();
+            assert_eq!(preedit_str, "á");
+            viet_ime_free_result(res_kp1);
+
+            // Kiểm tra excluded_apps với đường dẫn tuyệt đối và Flatpak ID
+            let prog = CString::new("/usr/lib/steam/steam-runtime").unwrap();
             viet_ime_context_set_program(ctx, prog.as_ptr());
             let res = viet_ime_context_process_key(ctx, b'a' as u32, 0, false);
             assert!(!res.handled);
