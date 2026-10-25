@@ -308,11 +308,7 @@ impl ImeConfig {
 
         self.excluded_apps.iter().any(|rule| {
             let r = rule.trim().to_ascii_lowercase();
-            !r.is_empty()
-                && (r == lower
-                    || r == basename
-                    || r == stripped
-                    || r == flatpak_tail)
+            !r.is_empty() && (r == lower || r == basename || r == stripped || r == flatpak_tail)
         })
     }
 
