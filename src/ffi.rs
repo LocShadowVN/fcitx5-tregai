@@ -4,9 +4,7 @@ use crate::config::{ImeConfig, SmoothMode};
 use crate::engine::ImeEngine;
 use libc::c_char;
 use std::ffi::{CStr, CString};
-use std::fs;
 use std::ptr;
-use std::time::{Duration, Instant, SystemTime};
 
 #[repr(C)]
 pub struct FfiKeyResult {
@@ -23,8 +21,8 @@ pub struct VietImeContext {
     pub engine: ImeEngine,
     pub displayed_word: String,
     pub current_program: String,
-    last_config_check: Instant,
-    last_config_mtime: Option<SystemTime>,
+    pub has_client_preedit: bool,
+    pub has_surrounding_text: bool,
 }
 
 const FCITX_SHIFT_MASK: u32 = 1 << 0;
@@ -37,6 +35,8 @@ const KEYSYM_TAB: u32 = 0xff09;
 const KEYSYM_RETURN: u32 = 0xff0d;
 const KEYSYM_ESCAPE: u32 = 0xff1b;
 const KEYSYM_KP_ENTER: u32 = 0xff8d;
+const KEYSYM_KP_0: u32 = 0xffb0;
+const KEYSYM_KP_9: u32 = 0xffb9;
 
 fn into_c_string_ptr(s: Option<String>) -> *mut c_char {
     match s {
@@ -47,29 +47,13 @@ fn into_c_string_ptr(s: Option<String>) -> *mut c_char {
     }
 }
 
-fn current_config_mtime() -> Option<SystemTime> {
-    let path = ImeConfig::config_path()?;
-    fs::metadata(path).ok()?.modified().ok()
-}
-
 impl VietImeContext {
-    fn maybe_hot_reload_config(&mut self) {
-        if self.last_config_check.elapsed() >= Duration::from_millis(200) {
-            self.last_config_check = Instant::now();
-            let mtime = current_config_mtime();
-            if mtime != self.last_config_mtime {
-                self.last_config_mtime = mtime;
-                self.engine.config = ImeConfig::load_from_disk();
-                self.displayed_word.clear();
-            }
-        }
-    }
-
     fn is_direct_mode(&self) -> bool {
-        matches!(
-            self.engine.config.smooth_mode,
-            SmoothMode::Smooth | SmoothMode::SlowCompat
-        )
+        match self.engine.config.smooth_mode {
+            SmoothMode::SlowCompat => true,
+            SmoothMode::Smooth => self.has_surrounding_text || !self.has_client_preedit,
+            SmoothMode::UltraSmooth | SmoothMode::Gaming => false,
+        }
     }
 
     fn transition_direct_display(&mut self, target_display: &str) -> (u32, Option<String>) {
@@ -103,7 +87,8 @@ impl VietImeContext {
     ) -> FfiKeyResult {
         let cfg = &self.engine.config;
         let direct_mode = self.is_direct_mode();
-        let underline_preedit = cfg.underline_preedit && !direct_mode;
+        let underline_preedit =
+            cfg.underline_preedit && !direct_mode && cfg.smooth_mode != SmoothMode::Smooth;
         let commit_delay_ms = if cfg.smooth_mode == SmoothMode::SlowCompat {
             cfg.commit_delay_ms
         } else {
@@ -129,8 +114,8 @@ pub extern "C" fn viet_ime_context_new() -> *mut VietImeContext {
         engine: ImeEngine::new(config),
         displayed_word: String::with_capacity(32),
         current_program: String::new(),
-        last_config_check: Instant::now(),
-        last_config_mtime: current_config_mtime(),
+        has_client_preedit: true,
+        has_surrounding_text: true,
     });
     Box::into_raw(ctx)
 }
@@ -178,6 +163,22 @@ pub unsafe extern "C" fn viet_ime_context_set_program(
     }
 }
 
+/// Updates client capability flags reported by Fcitx5 (`Preedit` and `SurroundingText`).
+///
+/// # Safety
+/// `ctx` must be either null or a valid pointer to `VietImeContext`.
+#[no_mangle]
+pub unsafe extern "C" fn viet_ime_context_set_capabilities(
+    ctx: *mut VietImeContext,
+    has_client_preedit: bool,
+    has_surrounding_text: bool,
+) {
+    if let Some(c) = ctx.as_mut() {
+        c.has_client_preedit = has_client_preedit;
+        c.has_surrounding_text = has_surrounding_text;
+    }
+}
+
 /// Reloads configuration from disk for the given `VietImeContext`.
 ///
 /// # Safety
@@ -186,7 +187,6 @@ pub unsafe extern "C" fn viet_ime_context_set_program(
 pub unsafe extern "C" fn viet_ime_context_reload_config(ctx: *mut VietImeContext) {
     if let Some(c) = ctx.as_mut() {
         c.engine.config = ImeConfig::load_from_disk();
-        c.last_config_mtime = current_config_mtime();
         c.engine.clear();
         c.displayed_word.clear();
     }
@@ -229,7 +229,7 @@ pub unsafe extern "C" fn viet_ime_context_flush(ctx: *mut VietImeContext) -> Ffi
 #[no_mangle]
 pub unsafe extern "C" fn viet_ime_context_process_key(
     ctx: *mut VietImeContext,
-    keysym: u32,
+    mut keysym: u32,
     state: u32,
     is_release: bool,
 ) -> FfiKeyResult {
@@ -248,12 +248,15 @@ pub unsafe extern "C" fn viet_ime_context_process_key(
     }
 
     let c = &mut *ctx;
-    c.maybe_hot_reload_config();
 
     if c.engine.config.is_app_excluded(&c.current_program) {
         c.engine.clear();
         c.displayed_word.clear();
         return empty_result;
+    }
+
+    if (KEYSYM_KP_0..=KEYSYM_KP_9).contains(&keysym) {
+        keysym = (b'0' as u32) + (keysym - KEYSYM_KP_0);
     }
 
     let direct = c.is_direct_mode();
@@ -314,6 +317,7 @@ pub unsafe extern "C" fn viet_ime_context_process_key(
     if (0x20..=0x7e).contains(&keysym) {
         let ch = keysym as u8 as char;
         let res = c.engine.process_char(ch);
+        let extra_bs = c.engine.take_pending_backspaces();
         if !res.handled {
             c.displayed_word.clear();
             return empty_result;
@@ -323,14 +327,14 @@ pub unsafe extern "C" fn viet_ime_context_process_key(
             if let Some(committed) = res.commit {
                 let (bs, diff_commit) = c.transition_direct_display(&committed);
                 c.displayed_word.clear();
-                return c.build_result(true, diff_commit, None, bs);
+                return c.build_result(true, diff_commit, None, bs + extra_bs);
             }
             let (bs, diff_commit) = c.transition_direct_display(&res.preedit);
-            return c.build_result(true, diff_commit, None, bs);
+            return c.build_result(true, diff_commit, None, bs + extra_bs);
         }
 
         c.displayed_word.clear();
-        return c.build_result(true, res.commit, Some(res.preedit), 0);
+        return c.build_result(true, res.commit, Some(res.preedit), extra_bs);
     }
 
     if !c.engine.is_empty() {
