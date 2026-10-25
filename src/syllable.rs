@@ -50,7 +50,7 @@ const COMMON_ENGLISH_WORDS: &[&str] = &[
     "poor", "power", "press", "public", "puff", "pull", "python", "raw", "reel", "return", "roll",
     "root", "row", "rust", "saw", "search", "see", "seed", "seek", "select", "server", "sex",
     "show", "six", "slow", "snow", "soon", "source", "staff", "static", "status", "stiff",
-    "stream", "string", "struct", "stuff", " sudo", "switch", "system", "tax", "text", "tool",
+    "stream", "string", "struct", "stuff", "sudo", "switch", "system", "tax", "text", "tool",
     "tower", "tree", "user", "vex", "view", "was", "water", "wax", "wayland", "web", "week",
     "well", "went", "west", "what", "when", "where", "which", "while", "who", "why", "widget",
     "wifi", "win", "window", "windows", "with", "word", "work", "world", "write", "wrong", "www",
@@ -204,4 +204,87 @@ pub fn find_tone_position(glyphs: &[Glyph], modern_tone: bool) -> Option<usize> 
                 Some(v_start)
             };
         }
-        return Some(v_sta
+        return Some(v_start);
+    }
+
+    Some(v_start + 1)
+}
+
+pub fn check_consonant_vowel_orthography(
+    initial: &str,
+    first_vowel_base: char,
+    allow_foreign: bool,
+) -> bool {
+    if allow_foreign {
+        return true;
+    }
+    match initial {
+        "k" => matches!(first_vowel_base, 'i' | 'e' | 'y'),
+        "gh" | "ngh" => matches!(first_vowel_base, 'i' | 'e'),
+        "c" | "ng" => !matches!(first_vowel_base, 'i' | 'e' | 'y'),
+        "g" => first_vowel_base != 'e',
+        _ => true,
+    }
+}
+
+pub fn is_valid_vietnamese_syllable(glyphs: &[Glyph], tone: Tone, allow_foreign: bool) -> bool {
+    if glyphs.is_empty() {
+        return false;
+    }
+
+    let analysis = analyze_syllable(glyphs);
+    if !analysis.is_structure_valid || analysis.vowel_range.is_empty() {
+        return false;
+    }
+
+    let mut initial = String::with_capacity(4);
+    for g in &glyphs[analysis.initial_range] {
+        if g.base == 'd' && g.d_stroke {
+            initial.push('đ');
+        } else {
+            initial.push(g.base);
+        }
+    }
+    let valid_init = VALID_INITIALS.contains(&initial.as_str())
+        || (allow_foreign && FOREIGN_INITIALS.contains(&initial.as_str()));
+    if !valid_init {
+        return false;
+    }
+
+    let first_vowel_base = glyphs[analysis.vowel_range.start].base;
+    if !check_consonant_vowel_orthography(&initial, first_vowel_base, allow_foreign) {
+        return false;
+    }
+
+    let mut final_cons = String::with_capacity(4);
+    for g in &glyphs[analysis.final_range] {
+        if g.d_stroke {
+            return false;
+        }
+        final_cons.push(g.base);
+    }
+    if !VALID_FINALS.contains(&final_cons.as_str()) {
+        return false;
+    }
+
+    if matches!(final_cons.as_str(), "c" | "ch" | "p" | "t")
+        && !matches!(tone, Tone::Acute | Tone::Dot)
+    {
+        return false;
+    }
+
+    let mut vowel_cluster = String::with_capacity(6);
+    for g in &glyphs[analysis.vowel_range] {
+        vowel_cluster.push(g.modded_vowel_char());
+    }
+
+    if initial.is_empty() && vowel_cluster == "ưi" {
+        return false;
+    }
+
+    if final_cons.is_empty() {
+        OPEN_VOWEL_CLUSTERS.contains(&vowel_cluster.as_str())
+    } else {
+        CLOSED_VOWEL_CLUSTERS.contains(&vowel_cluster.as_str())
+    }
+}
