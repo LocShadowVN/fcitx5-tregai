@@ -17,7 +17,7 @@ fn main() {
         let mut build = cc::Build::new();
         build
             .cpp(true)
-            .std("c++17")
+            .std("c++20")
             .file("csrc/fcitx5_bridge.cpp")
             .flag_if_supported("-Wall")
             .flag_if_supported("-Wextra")
